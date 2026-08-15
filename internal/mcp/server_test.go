@@ -57,7 +57,21 @@ func TestServeListsTools(t *testing.T) {
 	), &output); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), `"name":"cat"`) {
-		t.Fatalf("cat tool not listed: %s", output.String())
+	for _, name := range []string{"cat", "cp", "date", "grep", "pwd"} {
+		if !strings.Contains(output.String(), `"name":"`+name+`"`) {
+			t.Fatalf("%s tool not listed: %s", name, output.String())
+		}
+	}
+}
+
+func TestServeCallsGrep(t *testing.T) {
+	var output bytes.Buffer
+	if err := Serve(context.Background(), strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"grep","arguments":{"args":["-n","match"],"stdin":"skip\nmatch\n"}}}`+"\n",
+	), &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "2:match\\n") {
+		t.Fatalf("unexpected grep result: %s", output.String())
 	}
 }

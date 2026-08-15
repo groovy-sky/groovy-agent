@@ -8,9 +8,9 @@ the current Go standard library and a stream-oriented API.
 
 ## Utilities
 
-`base64`, `basename`, `cat`, `cut`, `dirname`, `head`, `link`, `mkdir`,
-`paste`, `pwd`, `rmdir`, `sha256sum`, `sort`, `tail`, `tee`, `touch`, `tr`,
-`uniq`, `unlink`, and `wc`.
+`base64`, `basename`, `cat`, `cp`, `cut`, `date`, `dirname`, `grep`, `head`,
+`link`, `mkdir`, `paste`, `pwd`, `rmdir`, `sha256sum`, `sort`, `tail`, `tee`,
+`touch`, `tr`, `uniq`, `unlink`, and `wc`.
 
 Each MCP tool accepts optional `args` (an array of command arguments) and
 `stdin` (a string). File operands are resolved relative to the server process.
@@ -59,3 +59,10 @@ printf 'b\na\n' | go run . sort
 This is a focused, portable implementation rather than a claim of complete
 GNU coreutils compatibility. Unsupported options return an error instead of
 being silently ignored.
+
+`grep` supports regular expressions by default, or literal searches with `-F`,
+along with `-n` (line numbers), `-v` (inverted matches), and `-E`. Each input
+is limited to 16 MiB. `cp` copies regular files and will not replace an
+existing destination unless `-f` is supplied. `date` supports `-u` and a
+`+FORMAT` using `%Y`, `%m`, `%d`, `%H`, `%M`, `%S`, `%z`, `%Z`, `%F`, `%T`,
+and `%%`.
