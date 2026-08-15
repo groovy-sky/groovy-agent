@@ -8,7 +8,7 @@ import (
 	"regexp"
 )
 
-const maxGrepInputSize = 16 << 20
+const maxGrepInputSize int64 = 16 << 20
 
 func init() {
 	register(Command{"grep", "Search input lines using a regular expression or literal string", runGrep})

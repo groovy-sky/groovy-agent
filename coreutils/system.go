@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -47,22 +48,30 @@ func runCP(ctx context.Context, args []string, _ io.Reader, _ io.Writer, _ io.Wr
 		return err
 	}
 	defer input.Close()
-	flags := os.O_WRONLY | os.O_CREATE
-	if force {
-		flags |= os.O_TRUNC
-	} else {
-		flags |= os.O_EXCL
-	}
-	output, err := os.OpenFile(destination, flags, info.Mode().Perm())
+	temporary, err := os.CreateTemp(filepath.Dir(destination), "."+filepath.Base(destination)+".tmp-*")
 	if err != nil {
 		return err
 	}
-	copyErr := copyWithContext(ctx, output, input)
-	closeErr := output.Close()
-	if copyErr != nil {
-		return copyErr
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(info.Mode().Perm()); err != nil {
+		_ = temporary.Close()
+		return err
 	}
-	return closeErr
+	if err := copyWithContext(ctx, temporary, input); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if force {
+		return os.Rename(temporaryName, destination)
+	}
+	if err := os.Link(temporaryName, destination); err != nil {
+		return err
+	}
+	return os.Remove(temporaryName)
 }
 
 func copyWithContext(ctx context.Context, destination io.Writer, source io.Reader) error {
