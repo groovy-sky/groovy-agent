@@ -162,7 +162,8 @@ func runTouch(_ context.Context, args []string, _ io.Reader, _ io.Writer, _ io.W
 		if err := file.Close(); err != nil {
 			return err
 		}
-		if err := os.Chtimes(name, timeNow(), timeNow()); err != nil {
+		now := timeNow()
+		if err := os.Chtimes(name, now, now); err != nil {
 			return err
 		}
 	}

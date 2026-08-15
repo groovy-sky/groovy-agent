@@ -148,9 +148,6 @@ func callTool(ctx context.Context, raw json.RawMessage) (any, *rpcError) {
 	if stderr.Len() > 0 {
 		text += stderr.String()
 	}
-	result := map[string]any{
-		"content": []map[string]string{{"type": "text", "text": text}},
-	}
 	if err != nil {
 		if errors.Is(err, errOutputLimit) {
 			err = fmt.Errorf("output exceeded %d bytes", maxOutputSize)
@@ -158,10 +155,14 @@ func callTool(ctx context.Context, raw json.RawMessage) (any, *rpcError) {
 		if text != "" && text[len(text)-1] != '\n' {
 			text += "\n"
 		}
-		result["content"] = []map[string]string{{"type": "text", "text": text + err.Error()}}
-		result["isError"] = true
+		return map[string]any{
+			"content": []map[string]string{{"type": "text", "text": text + err.Error()}},
+			"isError": true,
+		}, nil
 	}
-	return result, nil
+	return map[string]any{
+		"content": []map[string]string{{"type": "text", "text": text}},
+	}, nil
 }
 
 var errOutputLimit = errors.New("output limit exceeded")

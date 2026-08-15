@@ -120,15 +120,15 @@ func runPaste(_ context.Context, args []string, stdin io.Reader, out, _ io.Write
 	}
 	for {
 		values := make([]string, len(scanners))
-		any := false
+		hasValue := false
 		for i, scanner := range scanners {
 			if scanner.Scan() {
-				values[i], any = scanner.Text(), true
+				values[i], hasValue = scanner.Text(), true
 			} else if err := scanner.Err(); err != nil {
 				return err
 			}
 		}
-		if !any {
+		if !hasValue {
 			return nil
 		}
 		if _, err := fmt.Fprintln(out, strings.Join(values, delimiter)); err != nil {
