@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func execute(t *testing.T, name string, args []string, input string) (string, error) {
@@ -70,6 +71,70 @@ func TestTr(t *testing.T) {
 		t.Fatal(err)
 	}
 	if output != "CAB\n" {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestGrep(t *testing.T) {
+	output, err := execute(t, "grep", []string{"-n", "-v", "-F", "match"}, "match\nother\nmatching\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "2:other\n" {
+		t.Fatalf("output = %q", output)
+	}
+
+	output, err = execute(t, "grep", []string{"a.$"}, "a1\nab\nabc\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "a1\nab\n" {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestCP(t *testing.T) {
+	directory := t.TempDir()
+	source := filepath.Join(directory, "source")
+	destination := filepath.Join(directory, "destination")
+	if err := os.WriteFile(source, []byte("contents"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execute(t, "cp", []string{source, destination}, ""); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "contents" {
+		t.Fatalf("copied contents = %q", data)
+	}
+	if _, err := execute(t, "cp", []string{source, destination}, ""); err == nil {
+		t.Fatal("expected existing destination error")
+	}
+	if _, err := execute(t, "cp", []string{"-f", source, destination}, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDate(t *testing.T) {
+	original := timeNow
+	timeNow = func() time.Time { return time.Date(2026, time.August, 15, 19, 37, 14, 0, time.FixedZone("TEST", 3600)) }
+	t.Cleanup(func() { timeNow = original })
+
+	output, err := execute(t, "date", []string{"+%F %T %Z"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "2026-08-15 19:37:14 TEST\n" {
+		t.Fatalf("output = %q", output)
+	}
+	output, err = execute(t, "date", []string{"-u", "+%z"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "+0000\n" {
 		t.Fatalf("output = %q", output)
 	}
 }

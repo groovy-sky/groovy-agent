@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"regexp"
-	"strings"
 )
 
 const maxGrepInputSize = 16 << 20
@@ -47,7 +46,7 @@ parsed:
 		return fmt.Errorf("grep: invalid pattern: %w", err)
 	}
 	return eachInput(args[1:], stdin, func(_ string, input io.Reader) error {
-		scanner := bufio.NewScanner(io.LimitReader(input, maxGrepInputSize+1))
+		scanner := bufio.NewScanner(&grepLimitReader{reader: input, remaining: maxGrepInputSize})
 		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		for line := 1; scanner.Scan(); line++ {
 			if err := ctx.Err(); err != nil {
@@ -71,4 +70,26 @@ parsed:
 		}
 		return nil
 	})
+}
+
+type grepLimitReader struct {
+	reader    io.Reader
+	remaining int64
+}
+
+func (reader *grepLimitReader) Read(data []byte) (int, error) {
+	if reader.remaining == 0 {
+		var extra [1]byte
+		count, err := reader.reader.Read(extra[:])
+		if count > 0 {
+			return 0, fmt.Errorf("grep: input exceeds %d MiB limit", maxGrepInputSize>>20)
+		}
+		return 0, err
+	}
+	if int64(len(data)) > reader.remaining {
+		data = data[:reader.remaining]
+	}
+	count, err := reader.reader.Read(data)
+	reader.remaining -= int64(count)
+	return count, err
 }

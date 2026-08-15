@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
 )
 
 func init() {
@@ -131,5 +130,3 @@ func dateLayout(format string) (string, error) {
 	}
 	return replacer.Replace(format), nil
 }
-
-var _ = time.Time{}
