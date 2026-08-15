@@ -4,11 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/md5"
-	"crypto/sha1"
 	"crypto/sha256"
-	"crypto/sha512"
-	"encoding/base32"
 	"encoding/base64"
 	"fmt"
 	"hash"
@@ -17,17 +13,10 @@ import (
 )
 
 func init() {
-	register(Command{"base32", "Encode or decode base32 data", runBase32})
 	register(Command{"base64", "Encode or decode base64 data", runBase64})
-	register(Command{"md5sum", "Compute MD5 checksums", checksum(md5.New)})
-	register(Command{"sha1sum", "Compute SHA-1 checksums", checksum(sha1.New)})
-	register(Command{"sha224sum", "Compute SHA-224 checksums", checksum(sha256.New224)})
 	register(Command{"sha256sum", "Compute SHA-256 checksums", checksum(sha256.New)})
-	register(Command{"sha384sum", "Compute SHA-384 checksums", checksum(sha512.New384)})
-	register(Command{"sha512sum", "Compute SHA-512 checksums", checksum(sha512.New)})
 	register(Command{"uniq", "Report or omit adjacent repeated lines", runUniq})
 	register(Command{"wc", "Print newline, word, and byte counts", runWC})
-	register(Command{"tac", "Concatenate and print lines in reverse", runTac})
 }
 
 func baseArgs(name string, args []string) (decode bool, files []string, err error) {
@@ -38,28 +27,6 @@ func baseArgs(name string, args []string) (decode bool, files []string, err erro
 		return false, nil, fmt.Errorf("%s: expected at most one file", name)
 	}
 	return decode, args, nil
-}
-
-func runBase32(_ context.Context, args []string, stdin io.Reader, out, _ io.Writer) error {
-	decode, files, err := baseArgs("base32", args)
-	if err != nil {
-		return err
-	}
-	return eachInput(files, stdin, func(_ string, input io.Reader) error {
-		if decode {
-			_, err := io.Copy(out, base32.NewDecoder(base32.StdEncoding, input))
-			return err
-		}
-		encoder := base32.NewEncoder(base32.StdEncoding, out)
-		if _, err := io.Copy(encoder, input); err != nil {
-			return err
-		}
-		if err := encoder.Close(); err != nil {
-			return err
-		}
-		_, err := fmt.Fprintln(out)
-		return err
-	})
 }
 
 func runBase64(_ context.Context, args []string, stdin io.Reader, out, _ io.Writer) error {
@@ -148,27 +115,5 @@ func runWC(_ context.Context, args []string, stdin io.Reader, out, _ io.Writer) 
 		words := len(strings.Fields(string(data)))
 		_, err = fmt.Fprintf(out, "%d %d %d %s\n", lines, words, len(data), name)
 		return err
-	})
-}
-
-func runTac(_ context.Context, args []string, stdin io.Reader, out, _ io.Writer) error {
-	return eachInput(args, stdin, func(_ string, input io.Reader) error {
-		data, err := readAllLimited(input)
-		if err != nil {
-			return err
-		}
-		trailingNewline := len(data) > 0 && data[len(data)-1] == '\n'
-		lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
-		for i := len(lines) - 1; i >= 0; i-- {
-			if _, err := io.WriteString(out, lines[i]); err != nil {
-				return err
-			}
-			if i > 0 || trailingNewline {
-				if _, err := io.WriteString(out, "\n"); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
 	})
 }

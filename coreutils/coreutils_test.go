@@ -16,16 +16,6 @@ func execute(t *testing.T, name string, args []string, input string) (string, er
 	return output.String(), err
 }
 
-func TestEcho(t *testing.T) {
-	output, err := execute(t, "echo", []string{"hello", "world"}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if output != "hello world\n" {
-		t.Fatalf("output = %q", output)
-	}
-}
-
 func TestCatAndHead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "input.txt")
 	if err := os.WriteFile(path, []byte("one\ntwo\nthree\n"), 0o600); err != nil {

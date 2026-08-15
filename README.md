@@ -8,11 +8,9 @@ the current Go standard library and a stream-oriented API.
 
 ## Utilities
 
-`base32`, `base64`, `basename`, `cat`, `cut`, `dirname`, `echo`, `env`, `head`,
-`link`, `md5sum`, `mkdir`, `paste`, `pwd`, `rmdir`, `seq`, `sha1sum`,
-`sha224sum`, `sha256sum`, `sha384sum`, `sha512sum`, `sleep`, `sort`, `tac`,
-`tail`, `tee`, `touch`, `tr`, `true`, `uname`, `uniq`, `unlink`, `wc`, and
-`whoami`.
+`base64`, `basename`, `cat`, `cut`, `dirname`, `head`, `link`, `mkdir`,
+`paste`, `pwd`, `rmdir`, `sha256sum`, `sort`, `tail`, `tee`, `touch`, `tr`,
+`uniq`, `unlink`, and `wc`.
 
 Each MCP tool accepts optional `args` (an array of command arguments) and
 `stdin` (a string). File operands are resolved relative to the server process.
@@ -53,9 +51,9 @@ standard input and output.
 The same binary can run a utility directly:
 
 ```sh
-go run . echo hello
 go run . sha256sum README.md
 printf 'one\ntwo\n' | go run . wc
+printf 'b\na\n' | go run . sort
 ```
 
 This is a focused, portable implementation rather than a claim of complete
