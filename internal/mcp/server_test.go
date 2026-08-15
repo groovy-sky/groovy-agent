@@ -12,7 +12,7 @@ func TestServeInitializeAndCall(t *testing.T) {
 	input := strings.Join([]string{
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
-		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"args":["hello","MCP"]}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cat","arguments":{"stdin":"hello MCP\n"}}}`,
 		"",
 	}, "\n")
 	var output bytes.Buffer
