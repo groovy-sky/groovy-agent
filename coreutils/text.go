@@ -14,7 +14,6 @@ import (
 	"hash"
 	"io"
 	"strings"
-	"unicode/utf8"
 )
 
 func init() {
@@ -173,5 +172,3 @@ func runTac(_ context.Context, args []string, stdin io.Reader, out, _ io.Writer)
 		return nil
 	})
 }
-
-var _ = utf8.RuneCount

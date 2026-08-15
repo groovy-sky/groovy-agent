@@ -221,6 +221,12 @@ func runLink(_ context.Context, args []string, _ io.Reader, _ io.Writer, _ io.Wr
 
 func readAllLimited(reader io.Reader) ([]byte, error) {
 	var buffer bytes.Buffer
-	_, err := io.Copy(&buffer, io.LimitReader(reader, 16<<20))
-	return buffer.Bytes(), err
+	_, err := io.Copy(&buffer, io.LimitReader(reader, (16<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if buffer.Len() > 16<<20 {
+		return nil, fmt.Errorf("input exceeds 16 MiB limit")
+	}
+	return buffer.Bytes(), nil
 }
