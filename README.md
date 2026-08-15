@@ -8,10 +8,11 @@ the current Go standard library and a stream-oriented API.
 
 ## Utilities
 
-`base32`, `base64`, `basename`, `cat`, `dirname`, `echo`, `env`, `head`,
-`link`, `md5sum`, `mkdir`, `pwd`, `rmdir`, `seq`, `sha1sum`, `sha224sum`,
-`sha256sum`, `sha384sum`, `sha512sum`, `sleep`, `tac`, `tail`, `tee`, `touch`,
-`true`, `uname`, `uniq`, `unlink`, `wc`, and `whoami`.
+`base32`, `base64`, `basename`, `cat`, `cut`, `dirname`, `echo`, `env`, `head`,
+`link`, `md5sum`, `mkdir`, `paste`, `pwd`, `rmdir`, `seq`, `sha1sum`,
+`sha224sum`, `sha256sum`, `sha384sum`, `sha512sum`, `sleep`, `sort`, `tac`,
+`tail`, `tee`, `touch`, `tr`, `true`, `uname`, `uniq`, `unlink`, `wc`, and
+`whoami`.
 
 Each MCP tool accepts optional `args` (an array of command arguments) and
 `stdin` (a string). File operands are resolved relative to the server process.

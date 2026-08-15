@@ -62,7 +62,11 @@ func runBasename(_ context.Context, args []string, _ io.Reader, out, _ io.Writer
 	if len(args) < 1 || len(args) > 2 {
 		return fmt.Errorf("basename: expected PATH [SUFFIX]")
 	}
-	name := filepath.Base(strings.TrimRight(args[0], string(filepath.Separator)))
+	path := strings.TrimRight(args[0], string(filepath.Separator))
+	if path == "" {
+		path = string(filepath.Separator)
+	}
+	name := filepath.Base(path)
 	if len(args) == 2 && args[1] != name {
 		name = strings.TrimSuffix(name, args[1])
 	}

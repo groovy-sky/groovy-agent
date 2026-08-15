@@ -59,3 +59,27 @@ func TestUnknownUtility(t *testing.T) {
 		t.Fatal("expected an error")
 	}
 }
+
+func TestCutAndSort(t *testing.T) {
+	output, err := execute(t, "cut", []string{"-d", ":", "-f", "1,3"}, "b:two:2\na:one:1\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err = execute(t, "sort", nil, output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "a:1\nb:2\n" {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestTr(t *testing.T) {
+	output, err := execute(t, "tr", []string{"abc", "ABC"}, "cab\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "CAB\n" {
+		t.Fatalf("output = %q", output)
+	}
+}
