@@ -80,11 +80,15 @@ type grepLimitReader struct {
 func (reader *grepLimitReader) Read(data []byte) (int, error) {
 	if reader.remaining == 0 {
 		var extra [1]byte
-		count, err := reader.reader.Read(extra[:])
-		if count > 0 {
-			return 0, fmt.Errorf("grep: input exceeds %d MiB limit", maxGrepInputSize>>20)
+		for {
+			count, err := reader.reader.Read(extra[:])
+			if count > 0 {
+				return 0, fmt.Errorf("grep: input exceeds %d MiB limit", maxGrepInputSize>>20)
+			}
+			if err != nil {
+				return 0, err
+			}
 		}
-		return 0, err
 	}
 	if int64(len(data)) > reader.remaining {
 		data = data[:reader.remaining]
