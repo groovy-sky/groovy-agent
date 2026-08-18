@@ -274,7 +274,11 @@ func executeToolCall(ctx context.Context, call toolCall) string {
 func marshalToolOutput(result toolOutput) string {
 	data, marshalErr := json.Marshal(result)
 	if marshalErr != nil {
-		return fmt.Sprintf(`{"error":%q}`, result.Error)
+		errorText, textErr := json.Marshal(result.Error)
+		if textErr != nil {
+			return `{"error":"failed to marshal tool result"}`
+		}
+		return `{"error":` + string(errorText) + `}`
 	}
 	return string(data)
 }
