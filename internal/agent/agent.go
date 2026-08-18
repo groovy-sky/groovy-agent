@@ -165,7 +165,7 @@ func (client *apiClient) Complete(ctx context.Context, messages []message, tools
 		var payload chatResponse
 		_ = json.Unmarshal(responseBody, &payload)
 		if payload.Error != nil && payload.Error.Message != "" {
-			return message{}, fmt.Errorf("api error: %s", payload.Error.Message)
+			return message{}, fmt.Errorf("api error: status %d: %s", response.StatusCode, payload.Error.Message)
 		}
 		text := strings.TrimSpace(string(responseBody))
 		if text == "" {
@@ -286,13 +286,13 @@ func marshalToolError(err error) string {
 }
 
 func supportsUtility(name string) bool {
-	utilityMetadata()
+	ensureUtilityMetadata()
 	_, ok := supportedUtilitySet[name]
 	return ok
 }
 
 func openAITools() []toolDefinition {
-	utilityNames, _ := utilityMetadata()
+	utilityNames := utilityNames()
 	return []toolDefinition{
 		{
 			Type: "function",
@@ -325,7 +325,7 @@ func openAITools() []toolDefinition {
 	}
 }
 
-func utilityMetadata() ([]string, map[string]struct{}) {
+func ensureUtilityMetadata() {
 	supportedUtilitiesOnce.Do(func() {
 		commands := coreutils.Commands()
 		supportedUtilityNames = make([]string, 0, len(commands))
@@ -335,5 +335,9 @@ func utilityMetadata() ([]string, map[string]struct{}) {
 			supportedUtilitySet[command.Name] = struct{}{}
 		}
 	})
-	return supportedUtilityNames, supportedUtilitySet
+}
+
+func utilityNames() []string {
+	ensureUtilityMetadata()
+	return append([]string{}, supportedUtilityNames...)
 }
