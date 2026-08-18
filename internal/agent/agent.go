@@ -150,15 +150,25 @@ func (client *apiClient) Complete(ctx context.Context, messages []message, tools
 		return message{}, err
 	}
 	defer response.Body.Close()
-	var payload chatResponse
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-		return message{}, fmt.Errorf("decode response: %w", err)
+	body, readErr := io.ReadAll(response.Body)
+	if readErr != nil {
+		return message{}, fmt.Errorf("read response: %w", readErr)
 	}
 	if response.StatusCode >= http.StatusBadRequest {
+		var payload chatResponse
+		_ = json.Unmarshal(body, &payload)
 		if payload.Error != nil && payload.Error.Message != "" {
 			return message{}, fmt.Errorf("api error: %s", payload.Error.Message)
 		}
-		return message{}, fmt.Errorf("api error: status %d", response.StatusCode)
+		text := strings.TrimSpace(string(body))
+		if text == "" {
+			return message{}, fmt.Errorf("api error: status %d", response.StatusCode)
+		}
+		return message{}, fmt.Errorf("api error: status %d: %s", response.StatusCode, text)
+	}
+	var payload chatResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return message{}, fmt.Errorf("decode response: %w", err)
 	}
 	if len(payload.Choices) == 0 {
 		return message{}, errors.New("api error: no choices returned")
@@ -185,9 +195,12 @@ func completeTurn(ctx context.Context, client chatClient, messages []message, to
 		}
 		messages = append(messages, message{Role: "assistant", Content: assistantMessage.Content, ToolCalls: assistantMessage.ToolCalls})
 		for _, call := range assistantMessage.ToolCalls {
+			if call.ID == "" {
+				return nil, "", errors.New("malformed tool call: missing id")
+			}
 			toolOutput, err := executeToolCall(ctx, call)
 			if err != nil {
-				return nil, "", err
+				toolOutput = marshalToolError(err)
 			}
 			messages = append(messages, message{
 				Role:       "tool",
@@ -225,9 +238,6 @@ type toolOutput struct {
 }
 
 func executeToolCall(ctx context.Context, call toolCall) (string, error) {
-	if call.ID == "" {
-		return "", errors.New("malformed tool call: missing id")
-	}
 	if call.Function.Name != "run_coreutil" {
 		return "", fmt.Errorf("unsupported tool %q", call.Function.Name)
 	}
@@ -258,6 +268,14 @@ func executeToolCall(ctx context.Context, call toolCall) (string, error) {
 		return "", marshalErr
 	}
 	return string(data), nil
+}
+
+func marshalToolError(err error) string {
+	data, marshalErr := json.Marshal(toolOutput{Error: err.Error()})
+	if marshalErr != nil {
+		return fmt.Sprintf(`{"error":%q}`, err.Error())
+	}
+	return string(data)
 }
 
 func supportsUtility(name string) bool {

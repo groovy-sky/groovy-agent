@@ -119,3 +119,75 @@ func TestExecuteToolCallErrors(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestCompleteTurnHandlesToolErrorWithoutAbort(t *testing.T) {
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestCount++
+		var payload chatRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		switch requestCount {
+		case 1:
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"run_coreutil","arguments":"{\"utility\":\"missing\"}"}}]}}]}`)
+		case 2:
+			last := payload.Messages[len(payload.Messages)-1]
+			if last.Role != "tool" {
+				t.Fatalf("last role = %q", last.Role)
+			}
+			toolOutput, err := contentText(last.Content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(toolOutput, `"error":"unsupported utility \"missing\""`) {
+				t.Fatalf("unexpected tool error output: %s", toolOutput)
+			}
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"fallback answer"}}]}`)
+		default:
+			t.Fatalf("unexpected request count %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	client := &apiClient{
+		httpClient: server.Client(),
+		apiKey:     "token",
+		model:      "test-model",
+		baseURL:    server.URL,
+	}
+	_, answer, err := completeTurn(
+		context.Background(),
+		client,
+		[]message{
+			{Role: "system", Content: "system"},
+			{Role: "user", Content: "test"},
+		},
+		openAITools(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "fallback answer" {
+		t.Fatalf("answer = %q", answer)
+	}
+}
+
+func TestAPIClientStatusErrorWithoutJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(writer, "upstream unavailable")
+	}))
+	defer server.Close()
+
+	client := &apiClient{
+		httpClient: server.Client(),
+		apiKey:     "token",
+		model:      "test-model",
+		baseURL:    server.URL,
+	}
+	_, err := client.Complete(context.Background(), []message{{Role: "user", Content: "test"}}, openAITools())
+	if err == nil || !strings.Contains(err.Error(), "status 502") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
