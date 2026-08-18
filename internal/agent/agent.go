@@ -1,0 +1,307 @@
+package agent
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/groovy-sky/go-core-mcp/coreutils"
+)
+
+const (
+	defaultModel        = "gpt-4o-mini"
+	defaultBaseURL      = "https://api.openai.com/v1"
+	maxToolCallAttempts = 8
+)
+
+const systemPrompt = "You are a terminal AI assistant. Use the run_coreutil tool for file/text operations when needed. Tools run in the current working directory and only support listed utilities; there is no shell access."
+
+type message struct {
+	Role       string         `json:"role"`
+	Content    any            `json:"content,omitempty"`
+	ToolCalls  []toolCall     `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Name       string         `json:"name,omitempty"`
+}
+
+type toolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function toolFunction `json:"function"`
+}
+
+type toolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type toolDefinition struct {
+	Type     string       `json:"type"`
+	Function toolSpec     `json:"function"`
+}
+
+type toolSpec struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"`
+}
+
+type chatRequest struct {
+	Model    string           `json:"model"`
+	Messages []message        `json:"messages"`
+	Tools    []toolDefinition `json:"tools,omitempty"`
+}
+
+type chatResponse struct {
+	Choices []struct {
+		Message message `json:"message"`
+	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
+type chatClient interface {
+	Complete(context.Context, []message, []toolDefinition) (message, error)
+}
+
+type apiClient struct {
+	httpClient *http.Client
+	apiKey     string
+	model      string
+	baseURL    string
+}
+
+// Run starts the interactive terminal agent.
+func Run(ctx context.Context, input io.Reader, output, errOutput io.Writer) error {
+	client, err := clientFromEnv()
+	if err != nil {
+		return err
+	}
+	tools := openAITools()
+	fmt.Fprintln(output, "go-core-mcp agent mode. Type 'exit' to quit.")
+	scanner := bufio.NewScanner(input)
+	messages := []message{{Role: "system", Content: systemPrompt}}
+	for {
+		fmt.Fprint(output, "> ")
+		if !scanner.Scan() {
+			break
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if line == "exit" || line == "quit" {
+			return nil
+		}
+		turn := append(append([]message{}, messages...), message{Role: "user", Content: line})
+		updated, answer, err := completeTurn(ctx, client, turn, tools)
+		if err != nil {
+			fmt.Fprintf(errOutput, "agent error: %v\n", err)
+			continue
+		}
+		messages = updated
+		fmt.Fprintln(output, answer)
+	}
+	return scanner.Err()
+}
+
+func clientFromEnv() (*apiClient, error) {
+	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	if apiKey == "" {
+		return nil, errors.New("OPENAI_API_KEY is required")
+	}
+	model := strings.TrimSpace(os.Getenv("OPENAI_MODEL"))
+	if model == "" {
+		model = defaultModel
+	}
+	baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
+	if baseURL == "" {
+		baseURL = defaultBaseURL
+	}
+	return &apiClient{
+		httpClient: http.DefaultClient,
+		apiKey:     apiKey,
+		model:      model,
+		baseURL:    strings.TrimRight(baseURL, "/"),
+	}, nil
+}
+
+func (client *apiClient) Complete(ctx context.Context, messages []message, tools []toolDefinition) (message, error) {
+	body, err := json.Marshal(chatRequest{Model: client.model, Messages: messages, Tools: tools})
+	if err != nil {
+		return message{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.baseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return message{}, err
+	}
+	request.Header.Set("Authorization", "Bearer "+client.apiKey)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.httpClient.Do(request)
+	if err != nil {
+		return message{}, err
+	}
+	defer response.Body.Close()
+	var payload chatResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return message{}, fmt.Errorf("decode response: %w", err)
+	}
+	if response.StatusCode >= http.StatusBadRequest {
+		if payload.Error != nil && payload.Error.Message != "" {
+			return message{}, fmt.Errorf("api error: %s", payload.Error.Message)
+		}
+		return message{}, fmt.Errorf("api error: status %d", response.StatusCode)
+	}
+	if len(payload.Choices) == 0 {
+		return message{}, errors.New("api error: no choices returned")
+	}
+	return payload.Choices[0].Message, nil
+}
+
+func completeTurn(ctx context.Context, client chatClient, messages []message, tools []toolDefinition) ([]message, string, error) {
+	for i := 0; i < maxToolCallAttempts; i++ {
+		assistantMessage, err := client.Complete(ctx, messages, tools)
+		if err != nil {
+			return nil, "", err
+		}
+		if len(assistantMessage.ToolCalls) == 0 {
+			text, err := contentText(assistantMessage.Content)
+			if err != nil {
+				return nil, "", err
+			}
+			if strings.TrimSpace(text) == "" {
+				return nil, "", errors.New("assistant returned an empty response")
+			}
+			messages = append(messages, message{Role: "assistant", Content: text})
+			return messages, text, nil
+		}
+		messages = append(messages, message{Role: "assistant", Content: assistantMessage.Content, ToolCalls: assistantMessage.ToolCalls})
+		for _, call := range assistantMessage.ToolCalls {
+			toolOutput, err := executeToolCall(ctx, call)
+			if err != nil {
+				return nil, "", err
+			}
+			messages = append(messages, message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Name:       call.Function.Name,
+				Content:    toolOutput,
+			})
+		}
+	}
+	return nil, "", fmt.Errorf("tool loop exceeded %d iterations", maxToolCallAttempts)
+}
+
+func contentText(content any) (string, error) {
+	switch value := content.(type) {
+	case string:
+		return value, nil
+	case nil:
+		return "", nil
+	default:
+		return "", fmt.Errorf("unexpected assistant content type %T", content)
+	}
+}
+
+type toolInput struct {
+	Utility string   `json:"utility"`
+	Args    []string `json:"args"`
+	Stdin   string   `json:"stdin"`
+}
+
+type toolOutput struct {
+	Utility string `json:"utility"`
+	Stdout  string `json:"stdout,omitempty"`
+	Stderr  string `json:"stderr,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+func executeToolCall(ctx context.Context, call toolCall) (string, error) {
+	if call.ID == "" {
+		return "", errors.New("malformed tool call: missing id")
+	}
+	if call.Function.Name != "run_coreutil" {
+		return "", fmt.Errorf("unsupported tool %q", call.Function.Name)
+	}
+	decoder := json.NewDecoder(strings.NewReader(call.Function.Arguments))
+	decoder.DisallowUnknownFields()
+	var input toolInput
+	if err := decoder.Decode(&input); err != nil {
+		return "", fmt.Errorf("malformed tool arguments: %w", err)
+	}
+	if input.Utility == "" {
+		return "", errors.New("malformed tool arguments: utility is required")
+	}
+	if !supportsUtility(input.Utility) {
+		return "", fmt.Errorf("unsupported utility %q", input.Utility)
+	}
+	var stdout, stderr bytes.Buffer
+	err := coreutils.Run(ctx, input.Utility, input.Args, bytes.NewBufferString(input.Stdin), &stdout, &stderr)
+	result := toolOutput{
+		Utility: input.Utility,
+		Stdout:  stdout.String(),
+		Stderr:  stderr.String(),
+	}
+	if err != nil {
+		result.Error = err.Error()
+	}
+	data, marshalErr := json.Marshal(result)
+	if marshalErr != nil {
+		return "", marshalErr
+	}
+	return string(data), nil
+}
+
+func supportsUtility(name string) bool {
+	for _, command := range coreutils.Commands() {
+		if command.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func openAITools() []toolDefinition {
+	utilityNames := make([]string, 0, len(coreutils.Commands()))
+	for _, command := range coreutils.Commands() {
+		utilityNames = append(utilityNames, command.Name)
+	}
+	return []toolDefinition{
+		{
+			Type: "function",
+			Function: toolSpec{
+				Name:        "run_coreutil",
+				Description: "Run one available core utility with optional CLI args and optional stdin text.",
+				Parameters: map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []string{"utility"},
+					"properties": map[string]any{
+						"utility": map[string]any{
+							"type":        "string",
+							"enum":        utilityNames,
+							"description": "Name of the utility to run",
+						},
+						"args": map[string]any{
+							"type":        "array",
+							"description": "Command line args for the utility",
+							"items":       map[string]string{"type": "string"},
+						},
+						"stdin": map[string]any{
+							"type":        "string",
+							"description": "Text passed to the utility on stdin",
+						},
+					},
+				},
+			},
+		},
+	}
+}
