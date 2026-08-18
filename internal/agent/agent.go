@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/groovy-sky/go-core-mcp/coreutils"
 )
@@ -79,6 +80,12 @@ type apiClient struct {
 	baseURL    string
 }
 
+var (
+	supportedUtilitiesOnce sync.Once
+	supportedUtilityNames  []string
+	supportedUtilitySet    map[string]struct{}
+)
+
 // Run starts the interactive terminal agent.
 func Run(ctx context.Context, input io.Reader, output, errOutput io.Writer) error {
 	client, err := clientFromEnv()
@@ -135,11 +142,11 @@ func clientFromEnv() (*apiClient, error) {
 }
 
 func (client *apiClient) Complete(ctx context.Context, messages []message, tools []toolDefinition) (message, error) {
-	body, err := json.Marshal(chatRequest{Model: client.model, Messages: messages, Tools: tools})
+	requestBody, err := json.Marshal(chatRequest{Model: client.model, Messages: messages, Tools: tools})
 	if err != nil {
 		return message{}, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.baseURL+"/chat/completions", bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.baseURL+"/chat/completions", bytes.NewReader(requestBody))
 	if err != nil {
 		return message{}, err
 	}
@@ -150,24 +157,24 @@ func (client *apiClient) Complete(ctx context.Context, messages []message, tools
 		return message{}, err
 	}
 	defer response.Body.Close()
-	body, readErr := io.ReadAll(response.Body)
+	responseBody, readErr := io.ReadAll(response.Body)
 	if readErr != nil {
 		return message{}, fmt.Errorf("read response: %w", readErr)
 	}
 	if response.StatusCode >= http.StatusBadRequest {
 		var payload chatResponse
-		_ = json.Unmarshal(body, &payload)
+		_ = json.Unmarshal(responseBody, &payload)
 		if payload.Error != nil && payload.Error.Message != "" {
 			return message{}, fmt.Errorf("api error: %s", payload.Error.Message)
 		}
-		text := strings.TrimSpace(string(body))
+		text := strings.TrimSpace(string(responseBody))
 		if text == "" {
 			return message{}, fmt.Errorf("api error: status %d", response.StatusCode)
 		}
 		return message{}, fmt.Errorf("api error: status %d: %s", response.StatusCode, text)
 	}
 	var payload chatResponse
-	if err := json.Unmarshal(body, &payload); err != nil {
+	if err := json.Unmarshal(responseBody, &payload); err != nil {
 		return message{}, fmt.Errorf("decode response: %w", err)
 	}
 	if len(payload.Choices) == 0 {
@@ -279,19 +286,13 @@ func marshalToolError(err error) string {
 }
 
 func supportsUtility(name string) bool {
-	for _, command := range coreutils.Commands() {
-		if command.Name == name {
-			return true
-		}
-	}
-	return false
+	utilityMetadata()
+	_, ok := supportedUtilitySet[name]
+	return ok
 }
 
 func openAITools() []toolDefinition {
-	utilityNames := make([]string, 0, len(coreutils.Commands()))
-	for _, command := range coreutils.Commands() {
-		utilityNames = append(utilityNames, command.Name)
-	}
+	utilityNames, _ := utilityMetadata()
 	return []toolDefinition{
 		{
 			Type: "function",
@@ -305,7 +306,7 @@ func openAITools() []toolDefinition {
 					"properties": map[string]any{
 						"utility": map[string]any{
 							"type":        "string",
-							"enum":        utilityNames,
+							"enum":        append([]string{}, utilityNames...),
 							"description": "Name of the utility to run",
 						},
 						"args": map[string]any{
@@ -322,4 +323,17 @@ func openAITools() []toolDefinition {
 			},
 		},
 	}
+}
+
+func utilityMetadata() ([]string, map[string]struct{}) {
+	supportedUtilitiesOnce.Do(func() {
+		commands := coreutils.Commands()
+		supportedUtilityNames = make([]string, 0, len(commands))
+		supportedUtilitySet = make(map[string]struct{}, len(commands))
+		for _, command := range commands {
+			supportedUtilityNames = append(supportedUtilityNames, command.Name)
+			supportedUtilitySet[command.Name] = struct{}{}
+		}
+	})
+	return supportedUtilityNames, supportedUtilitySet
 }
