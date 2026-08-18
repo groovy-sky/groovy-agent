@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/groovy-sky/go-core-mcp/coreutils"
 )
@@ -134,7 +135,7 @@ func clientFromEnv() (*apiClient, error) {
 		baseURL = defaultBaseURL
 	}
 	return &apiClient{
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: 120 * time.Second},
 		apiKey:     apiKey,
 		model:      model,
 		baseURL:    strings.TrimRight(baseURL, "/"),
@@ -205,10 +206,7 @@ func completeTurn(ctx context.Context, client chatClient, messages []message, to
 			if call.ID == "" {
 				return nil, "", errors.New("malformed tool call: missing id")
 			}
-			toolOutput, err := executeToolCall(ctx, call)
-			if err != nil {
-				toolOutput = marshalToolError(err)
-			}
+			toolOutput := executeToolCall(ctx, call)
 			messages = append(messages, message{
 				Role:       "tool",
 				ToolCallID: call.ID,
@@ -244,21 +242,21 @@ type toolOutput struct {
 	Error   string `json:"error,omitempty"`
 }
 
-func executeToolCall(ctx context.Context, call toolCall) (string, error) {
+func executeToolCall(ctx context.Context, call toolCall) string {
 	if call.Function.Name != "run_coreutil" {
-		return "", fmt.Errorf("unsupported tool %q", call.Function.Name)
+		return marshalToolOutput(toolOutput{Error: fmt.Sprintf("unsupported tool %q", call.Function.Name)})
 	}
 	decoder := json.NewDecoder(strings.NewReader(call.Function.Arguments))
 	decoder.DisallowUnknownFields()
 	var input toolInput
 	if err := decoder.Decode(&input); err != nil {
-		return "", fmt.Errorf("malformed tool arguments: %w", err)
+		return marshalToolOutput(toolOutput{Error: fmt.Sprintf("malformed tool arguments: %v", err)})
 	}
 	if input.Utility == "" {
-		return "", errors.New("malformed tool arguments: utility is required")
+		return marshalToolOutput(toolOutput{Error: "malformed tool arguments: utility is required"})
 	}
 	if !supportsUtility(input.Utility) {
-		return "", fmt.Errorf("unsupported utility %q", input.Utility)
+		return marshalToolOutput(toolOutput{Utility: input.Utility, Error: fmt.Sprintf("unsupported utility %q", input.Utility)})
 	}
 	var stdout, stderr bytes.Buffer
 	err := coreutils.Run(ctx, input.Utility, input.Args, bytes.NewBufferString(input.Stdin), &stdout, &stderr)
@@ -270,17 +268,13 @@ func executeToolCall(ctx context.Context, call toolCall) (string, error) {
 	if err != nil {
 		result.Error = err.Error()
 	}
-	data, marshalErr := json.Marshal(result)
-	if marshalErr != nil {
-		return "", marshalErr
-	}
-	return string(data), nil
+	return marshalToolOutput(result)
 }
 
-func marshalToolError(err error) string {
-	data, marshalErr := json.Marshal(toolOutput{Error: err.Error()})
+func marshalToolOutput(result toolOutput) string {
+	data, marshalErr := json.Marshal(result)
 	if marshalErr != nil {
-		return fmt.Sprintf(`{"error":%q}`, err.Error())
+		return fmt.Sprintf(`{"error":%q}`, result.Error)
 	}
 	return string(data)
 }

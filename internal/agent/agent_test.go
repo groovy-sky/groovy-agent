@@ -107,7 +107,7 @@ func TestCompleteTurnExecutesToolCall(t *testing.T) {
 }
 
 func TestExecuteToolCallErrors(t *testing.T) {
-	_, err := executeToolCall(context.Background(), toolCall{
+	output := executeToolCall(context.Background(), toolCall{
 		ID:   "call_1",
 		Type: "function",
 		Function: toolFunction{
@@ -115,8 +115,8 @@ func TestExecuteToolCallErrors(t *testing.T) {
 			Arguments: `{"utility":"missing"}`,
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "unsupported utility") {
-		t.Fatalf("unexpected error: %v", err)
+	if !strings.Contains(output, `"error":"unsupported utility \"missing\""`) {
+		t.Fatalf("unexpected output: %s", output)
 	}
 }
 
