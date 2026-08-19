@@ -42,9 +42,10 @@ Inside the container:
 - `OPENAI_MODEL` defaults to `Qwen2.5-Coder-7B-Instruct-Q4_K_M`
 - `OPENAI_API_KEY` defaults to `local-llama` (override if needed)
 
-The agent still exposes only the existing `run_coreutil` tool that dispatches to
-the internal `coreutils.Run(...)` implementation. It does **not** expose shell
-execution or arbitrary command execution.
+The agent exposes a safe coding toolset (workspace-confined file read/write,
+bounded search/listing, and fixed `git status`/`git diff` helpers) plus
+`run_coreutil`. It does **not** expose shell execution or arbitrary command
+execution.
 
 ### Requirements
 
@@ -144,10 +145,8 @@ standard input and output.
 
 ## Agent mode (interactive REPL)
 
-The same binary also supports a minimal terminal agent:
-
 ```sh
-go run . agent
+go run . agent [--workspace PATH] [--plan] [--yolo] [--resume SESSION_ID]
 ```
 
 Environment variables:
@@ -156,24 +155,41 @@ Environment variables:
 - `OPENAI_MODEL` (optional, default: `gpt-4o-mini`)
 - `OPENAI_BASE_URL` (optional, default: `https://api.openai.com/v1`)
 
-Example:
+Interactive slash commands:
+
+- `/help`
+- `/status`
+- `/diff`
+- `/plan` (toggle)
+- `/clear`
+- `/session`
+- `/resume <id>`
+
+Mutation tools (`write_file`, `apply_patch`, `mkdir`) require approval by
+default. Use `--yolo` to auto-approve. Use `--plan` to deny mutations while
+returning structured planning feedback to the model.
+
+Sessions are persisted as JSONL snapshots under:
+
+- `.groovy-agent/sessions/<session-id>.jsonl`
+
+Project instructions are loaded at startup (if present), in this order:
+
+1. `GROOVY.md`
+2. `AGENTS.md`
+3. `.groovy-agent/instructions.md`
+
+Loaded instructions are context only; they do not bypass workspace or approval
+policy.
+
+## Headless mode
 
 ```sh
-export OPENAI_API_KEY=...
-go run . agent
-# groovy-agent agent mode. Type 'exit' to quit.
-> count lines in README.md
-README.md has 100 lines.
-> show the first 2 lines
-# groovy-agent
+go run . run -p "summarize current diff" [--workspace PATH] [--output text|json] [--plan] [--yolo] [--resume SESSION_ID]
 ```
 
-The agent uses an OpenAI-compatible Chat Completions endpoint and exposes
-existing coreutils through one function tool (`run_coreutil`). Tool execution is
-conservative by design: utilities run in the current working directory with the
-same behavior as direct CLI/MCP mode. There is no shell execution, arbitrary
-command execution, memory store, scheduler, subagents, or external MCP client
-mode in this MVP.
+In non-interactive mode without `--yolo`, mutating tools are denied instead of
+prompting.
 
 ## Command-line use
 
@@ -188,8 +204,19 @@ printf 'b\na\n' | go run . sort
 Behavior summary:
 
 - `groovy-agent` (no args) or `groovy-agent mcp`: MCP server mode
-- `groovy-agent agent`: interactive AI agent mode
+- `groovy-agent agent [flags]`: interactive AI agent mode
+- `groovy-agent run -p \"...\" [flags]`: headless agent mode
 - `groovy-agent <utility> ...`: direct coreutils command mode
+
+## Safe coding boundaries and non-goals
+
+- No unrestricted shell execution, generic `exec`, or network-fetch tools.
+- File tools are confined to a canonical workspace root.
+- Path traversal (`..`), absolute paths outside workspace, and symlink escapes
+  are rejected.
+- `apply_patch` intentionally supports a robust subset of unified diff:
+  text-only updates to existing regular files; rename/copy/binary/new/delete
+  patch metadata is rejected in favor of explicit `write_file`/`mkdir`.
 
 This is a focused, portable implementation rather than a claim of complete
 GNU coreutils compatibility. Unsupported options return an error instead of

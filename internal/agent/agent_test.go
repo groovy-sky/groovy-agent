@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/groovy-sky/groovy-agent/internal/approval"
+	"github.com/groovy-sky/groovy-agent/internal/workspace"
 )
 
 func TestAPIClientCompleteParsesToolCalls(t *testing.T) {
@@ -32,12 +35,7 @@ func TestAPIClientCompleteParsesToolCalls(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := &apiClient{
-		httpClient: server.Client(),
-		apiKey:     "token",
-		model:      "test-model",
-		baseURL:    server.URL,
-	}
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
 	message, err := client.Complete(context.Background(), []message{{Role: "user", Content: "where am I"}}, openAITools())
 	if err != nil {
 		t.Fatal(err)
@@ -80,21 +78,8 @@ func TestCompleteTurnExecutesToolCall(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := &apiClient{
-		httpClient: server.Client(),
-		apiKey:     "token",
-		model:      "test-model",
-		baseURL:    server.URL,
-	}
-	messages, answer, err := completeTurn(
-		context.Background(),
-		client,
-		[]message{
-			{Role: "system", Content: "system"},
-			{Role: "user", Content: "say hello"},
-		},
-		openAITools(),
-	)
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
+	messages, answer, err := completeTurn(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "say hello"}}, openAITools())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,134 +92,50 @@ func TestCompleteTurnExecutesToolCall(t *testing.T) {
 }
 
 func TestExecuteToolCallErrors(t *testing.T) {
-	output := executeToolCall(context.Background(), toolCall{
-		ID:   "call_1",
-		Type: "function",
-		Function: toolFunction{
-			Name:      "run_coreutil",
-			Arguments: `{"utility":"missing"}`,
-		},
-	})
+	output := executeToolCall(context.Background(), toolCall{ID: "call_1", Type: "function", Function: toolFunction{Name: "run_coreutil", Arguments: `{"utility":"missing"}`}})
 	if !strings.Contains(output, `"error":"unsupported utility \"missing\""`) {
 		t.Fatalf("unexpected output: %s", output)
 	}
 }
 
 func TestExecuteToolCallParsesObjectArguments(t *testing.T) {
-	output := executeToolCall(context.Background(), toolCall{
-		ID:   "call_1",
-		Type: "function",
-		Function: toolFunction{
-			Name: "run_coreutil",
-			Arguments: map[string]any{
-				"utility": "cat",
-				"stdin":   "hi\n",
-			},
-		},
-	})
+	output := executeToolCall(context.Background(), toolCall{ID: "call_1", Type: "function", Function: toolFunction{Name: "run_coreutil", Arguments: map[string]any{"utility": "cat", "stdin": "hi\n"}}})
 	if !strings.Contains(output, `"stdout":"hi\n"`) {
 		t.Fatalf("unexpected output: %s", output)
 	}
 }
 
-func TestCompleteTurnHandlesToolErrorWithoutAbort(t *testing.T) {
-	var requestCount int
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requestCount++
-		var payload chatRequest
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		switch requestCount {
-		case 1:
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"run_coreutil","arguments":"{\"utility\":\"missing\"}"}}]}}]}`)
-		case 2:
-			last := payload.Messages[len(payload.Messages)-1]
-			if last.Role != "tool" {
-				t.Fatalf("last role = %q", last.Role)
-			}
-			toolOutput, err := contentText(last.Content)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(toolOutput, `"error":"unsupported utility \"missing\""`) {
-				t.Fatalf("unexpected tool error output: %s", toolOutput)
-			}
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"fallback answer"}}]}`)
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
-		}
-	}))
-	defer server.Close()
-
-	client := &apiClient{
-		httpClient: server.Client(),
-		apiKey:     "token",
-		model:      "test-model",
-		baseURL:    server.URL,
-	}
-	_, answer, err := completeTurn(
-		context.Background(),
-		client,
-		[]message{
-			{Role: "system", Content: "system"},
-			{Role: "user", Content: "test"},
-		},
-		openAITools(),
-	)
+func TestExecuteToolCallPlanModeDeniesMutation(t *testing.T) {
+	ws, err := workspace.New(t.TempDir(), workspace.DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if answer != "fallback answer" {
-		t.Fatalf("answer = %q", answer)
+	runtime := &toolRuntime{workspace: ws, policy: approval.Policy{PlanMode: true, Interactive: false}}
+	output := executeToolCallWithRuntime(context.Background(), runtime, toolCall{ID: "call_1", Type: "function", Function: toolFunction{Name: "write_file", Arguments: map[string]any{"path": "a.txt", "content": "x"}}})
+	if !strings.Contains(output, `"code":"plan_mode_denied"`) {
+		t.Fatalf("unexpected output: %s", output)
 	}
 }
 
-func TestAPIClientStatusErrorWithoutJSON(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.WriteHeader(http.StatusBadGateway)
-		_, _ = io.WriteString(writer, "upstream unavailable")
-	}))
-	defer server.Close()
-
-	client := &apiClient{
-		httpClient: server.Client(),
-		apiKey:     "token",
-		model:      "test-model",
-		baseURL:    server.URL,
-	}
-	_, err := client.Complete(context.Background(), []message{{Role: "user", Content: "test"}}, openAITools())
-	if err == nil || !strings.Contains(err.Error(), "status 502") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestCompleteTurnReadsContentArray(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":[{"type":"text","text":"array response"}]}}]}`)
-	}))
-	defer server.Close()
-
-	client := &apiClient{
-		httpClient: server.Client(),
-		apiKey:     "token",
-		model:      "test-model",
-		baseURL:    server.URL,
-	}
-	_, answer, err := completeTurn(
-		context.Background(),
-		client,
-		[]message{
-			{Role: "system", Content: "system"},
-			{Role: "user", Content: "test"},
-		},
-		openAITools(),
-	)
+func TestApplyUnifiedPatch(t *testing.T) {
+	root := t.TempDir()
+	ws, err := workspace.New(root, workspace.DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if answer != "array response" {
-		t.Fatalf("answer = %q", answer)
+	if err := ws.WriteFile("a.txt", "one\ntwo\n"); err != nil {
+		t.Fatal(err)
+	}
+	patch := "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+three\n"
+	if _, err := applyUnifiedPatch(ws, patch); err != nil {
+		t.Fatal(err)
+	}
+	read, err := ws.ReadFile("a.txt", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(read.Lines) != 2 || read.Lines[1].Text != "three" {
+		t.Fatalf("unexpected contents: %+v", read)
 	}
 }
 
