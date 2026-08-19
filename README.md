@@ -93,6 +93,24 @@ in-image and BuildKit secret auth):
 HF_TOKEN=... DOWNLOAD_MODEL_AT_BUILD=1 ./scripts/package-image.sh
 ```
 
+### Run the published image (Qwen2.5 model included)
+
+The `ghcr.io/groovy-sky/groovy-agent:qwen2_5` image bundles the Qwen2.5 model,
+so no host model mount or separate download step is required:
+
+```sh
+docker run --rm -it \
+  -p 8080:8080 \
+  ghcr.io/groovy-sky/groovy-agent:qwen2_5
+```
+
+The entrypoint starts `llama-server` and then launches `groovy-agent agent`.
+The llama.cpp API is available on `http://localhost:8080` while the container
+is running.
+
+You can tune inference with the same environment variables documented below
+(`LLAMA_THREADS`, `LLAMA_CTX_SIZE`, `LLAMA_N_GPU_LAYERS`, etc.).
+
 ### Run with host-mounted model (recommended)
 
 ```sh
