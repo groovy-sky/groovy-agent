@@ -26,11 +26,11 @@ const (
 const systemPrompt = "You are a terminal AI assistant. Use the run_coreutil tool for file/text operations when needed. Tools run in the current working directory and only support listed utilities; there is no shell access."
 
 type message struct {
-	Role       string         `json:"role"`
-	Content    any            `json:"content,omitempty"`
-	ToolCalls  []toolCall     `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
-	Name       string         `json:"name,omitempty"`
+	Role       string     `json:"role"`
+	Content    any        `json:"content,omitempty"`
+	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Name       string     `json:"name,omitempty"`
 }
 
 type toolCall struct {
@@ -41,12 +41,12 @@ type toolCall struct {
 
 type toolFunction struct {
 	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
+	Arguments any    `json:"arguments"`
 }
 
 type toolDefinition struct {
-	Type     string       `json:"type"`
-	Function toolSpec     `json:"function"`
+	Type     string   `json:"type"`
+	Function toolSpec `json:"function"`
 }
 
 type toolSpec struct {
@@ -222,6 +222,24 @@ func contentText(content any) (string, error) {
 	switch value := content.(type) {
 	case string:
 		return value, nil
+	case []any:
+		var builder strings.Builder
+		for _, item := range value {
+			switch part := item.(type) {
+			case string:
+				builder.WriteString(part)
+			case map[string]any:
+				if text, ok := part["text"].(string); ok {
+					builder.WriteString(text)
+				}
+			}
+		}
+		return builder.String(), nil
+	case map[string]any:
+		if text, ok := value["text"].(string); ok {
+			return text, nil
+		}
+		return "", errors.New("assistant content object did not contain a text field")
 	case nil:
 		return "", nil
 	default:
@@ -246,10 +264,8 @@ func executeToolCall(ctx context.Context, call toolCall) string {
 	if call.Function.Name != "run_coreutil" {
 		return marshalToolOutput(toolOutput{Error: fmt.Sprintf("unsupported tool %q", call.Function.Name)})
 	}
-	decoder := json.NewDecoder(strings.NewReader(call.Function.Arguments))
-	decoder.DisallowUnknownFields()
-	var input toolInput
-	if err := decoder.Decode(&input); err != nil {
+	input, err := decodeToolInput(call.Function.Arguments)
+	if err != nil {
 		return marshalToolOutput(toolOutput{Error: fmt.Sprintf("malformed tool arguments: %v", err)})
 	}
 	if input.Utility == "" {
@@ -259,7 +275,7 @@ func executeToolCall(ctx context.Context, call toolCall) string {
 		return marshalToolOutput(toolOutput{Utility: input.Utility, Error: fmt.Sprintf("unsupported utility %q", input.Utility)})
 	}
 	var stdout, stderr bytes.Buffer
-	err := coreutils.Run(ctx, input.Utility, input.Args, bytes.NewBufferString(input.Stdin), &stdout, &stderr)
+	err = coreutils.Run(ctx, input.Utility, input.Args, bytes.NewBufferString(input.Stdin), &stdout, &stderr)
 	result := toolOutput{
 		Utility: input.Utility,
 		Stdout:  stdout.String(),
@@ -269,6 +285,29 @@ func executeToolCall(ctx context.Context, call toolCall) string {
 		result.Error = err.Error()
 	}
 	return marshalToolOutput(result)
+}
+
+func decodeToolInput(arguments any) (toolInput, error) {
+	var payload []byte
+	switch value := arguments.(type) {
+	case string:
+		payload = []byte(value)
+	case map[string]any:
+		data, err := json.Marshal(value)
+		if err != nil {
+			return toolInput{}, err
+		}
+		payload = data
+	default:
+		return toolInput{}, fmt.Errorf("unexpected arguments type %T", arguments)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var input toolInput
+	if err := decoder.Decode(&input); err != nil {
+		return toolInput{}, err
+	}
+	return input, nil
 }
 
 func marshalToolOutput(result toolOutput) string {

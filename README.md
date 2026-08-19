@@ -29,6 +29,102 @@ go build -o go-core-mcp .
 
 The implementation has no third-party runtime or build dependencies.
 
+## Dockerized local agent stack (go-core-mcp + llama.cpp)
+
+This repository includes a self-contained Docker runtime that starts:
+
+1. `llama.cpp` `llama-server` (OpenAI-compatible API on `:8080`)
+2. `go-core-mcp agent`, configured to call that local API by default
+
+Inside the container:
+
+- `OPENAI_BASE_URL` defaults to `http://127.0.0.1:8080/v1`
+- `OPENAI_MODEL` defaults to `Qwen2.5-Coder-7B-Instruct-Q4_K_M`
+- `OPENAI_API_KEY` defaults to `local-llama` (override if needed)
+
+The agent still exposes only the existing `run_coreutil` tool that dispatches to
+the internal `coreutils.Run(...)` implementation. It does **not** expose shell
+execution or arbitrary command execution.
+
+### Requirements
+
+- Docker with BuildKit support (`docker build --secret ...`)
+- Disk:
+  - image build/runtime dependencies: several GB
+  - model file: ~4-5 GB (`Q4_K_M` GGUF)
+- RAM: CPU inference is practical with ~16 GB+, but more is better
+
+CPU-only inference can be slow. Tune with:
+
+- `LLAMA_THREADS` (default auto-detected)
+- `LLAMA_CTX_SIZE` (default `8192`)
+- `LLAMA_N_GPU_LAYERS` (default `0`, raise for GPU offload builds/runtimes)
+- `LLAMA_EXTRA_ARGS` (space-separated extra flags; avoid values containing spaces, and **never** source this from untrusted input)
+
+### Model provisioning (no GGUF committed to git)
+
+Download the exact model locally (supports optional `HF_TOKEN`):
+
+```sh
+./scripts/download-model.sh
+# optional:
+# HF_TOKEN=... ./scripts/download-model.sh
+```
+
+This stores:
+
+- `artifacts/models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf`
+
+`*.gguf` is ignored by git.
+
+### Build and package image artifact
+
+Create and export image tarball to `output/go-core-mcp-agent.tar`:
+
+```sh
+./scripts/package-image.sh
+```
+
+Optional build-time model download (for environments where you want the model
+in-image and BuildKit secret auth):
+
+```sh
+HF_TOKEN=... DOWNLOAD_MODEL_AT_BUILD=1 ./scripts/package-image.sh
+```
+
+### Run with host-mounted model (recommended)
+
+```sh
+docker run --rm -it \
+  -v "$(pwd)/artifacts/models:/models:ro" \
+  -e LLAMA_MODEL_PATH=/models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
+  -p 8080:8080 \
+  go-core-mcp-agent:local
+```
+
+The entrypoint starts `llama-server`, waits for readiness, then launches
+`go-core-mcp agent`.
+
+### Runtime environment variables
+
+Agent/OpenAI-compatible settings (all optional in this image):
+
+- `OPENAI_BASE_URL`
+- `OPENAI_MODEL`
+- `OPENAI_API_KEY`
+
+llama-server/container settings:
+
+- `LLAMA_SERVER_HOST` (default `127.0.0.1`)
+- `LLAMA_SERVER_PORT` (default `8080`)
+- `LLAMA_MODEL_PATH` or `LLAMA_MODEL_FILE`
+- `LLAMA_MODEL_NAME` (model alias passed to `llama-server --alias`)
+- `LLAMA_CTX_SIZE`
+- `LLAMA_THREADS`
+- `LLAMA_N_GPU_LAYERS`
+- `LLAMA_EXTRA_ARGS`
+- `LLAMA_STARTUP_TIMEOUT`
+
 ## MCP configuration
 
 Build the binary and add it to an MCP client's configuration:
@@ -56,7 +152,7 @@ go run . agent
 
 Environment variables:
 
-- `OPENAI_API_KEY` (required)
+- `OPENAI_API_KEY` (required unless provided by container entrypoint defaults)
 - `OPENAI_MODEL` (optional, default: `gpt-4o-mini`)
 - `OPENAI_BASE_URL` (optional, default: `https://api.openai.com/v1`)
 

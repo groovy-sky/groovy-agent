@@ -120,6 +120,23 @@ func TestExecuteToolCallErrors(t *testing.T) {
 	}
 }
 
+func TestExecuteToolCallParsesObjectArguments(t *testing.T) {
+	output := executeToolCall(context.Background(), toolCall{
+		ID:   "call_1",
+		Type: "function",
+		Function: toolFunction{
+			Name: "run_coreutil",
+			Arguments: map[string]any{
+				"utility": "cat",
+				"stdin":   "hi\n",
+			},
+		},
+	})
+	if !strings.Contains(output, `"stdout":"hi\n"`) {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}
+
 func TestCompleteTurnHandlesToolErrorWithoutAbort(t *testing.T) {
 	var requestCount int
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -189,5 +206,61 @@ func TestAPIClientStatusErrorWithoutJSON(t *testing.T) {
 	_, err := client.Complete(context.Background(), []message{{Role: "user", Content: "test"}}, openAITools())
 	if err == nil || !strings.Contains(err.Error(), "status 502") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCompleteTurnReadsContentArray(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":[{"type":"text","text":"array response"}]}}]}`)
+	}))
+	defer server.Close()
+
+	client := &apiClient{
+		httpClient: server.Client(),
+		apiKey:     "token",
+		model:      "test-model",
+		baseURL:    server.URL,
+	}
+	_, answer, err := completeTurn(
+		context.Background(),
+		client,
+		[]message{
+			{Role: "system", Content: "system"},
+			{Role: "user", Content: "test"},
+		},
+		openAITools(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "array response" {
+		t.Fatalf("answer = %q", answer)
+	}
+}
+
+func TestClientFromEnvReadsOverrides(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "local-model")
+	t.Setenv("OPENAI_BASE_URL", "http://127.0.0.1:8080/v1/")
+
+	client, err := clientFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.apiKey != "token" {
+		t.Fatalf("api key = %q", client.apiKey)
+	}
+	if client.model != "local-model" {
+		t.Fatalf("model = %q", client.model)
+	}
+	if client.baseURL != "http://127.0.0.1:8080/v1" {
+		t.Fatalf("baseURL = %q", client.baseURL)
+	}
+}
+
+func TestClientFromEnvRequiresKey(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	if _, err := clientFromEnv(); err == nil {
+		t.Fatal("expected error")
 	}
 }
