@@ -1,4 +1,4 @@
-# go-core-mcp
+# groovy-agent
 
 A modern, dependency-free Go implementation of common coreutils, exposed as
 tools over the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/).
@@ -24,17 +24,17 @@ Go 1.24 or newer is required.
 ```sh
 go test ./...
 go vet ./...
-go build -o go-core-mcp .
+go build -o groovy-agent .
 ```
 
 The implementation has no third-party runtime or build dependencies.
 
-## Dockerized local agent stack (go-core-mcp + llama.cpp)
+## Dockerized local agent stack (groovy-agent + llama.cpp)
 
 This repository includes a self-contained Docker runtime that starts:
 
 1. `llama.cpp` `llama-server` (OpenAI-compatible API on `:8080`)
-2. `go-core-mcp agent`, configured to call that local API by default
+2. `groovy-agent agent`, configured to call that local API by default
 
 Inside the container:
 
@@ -79,7 +79,7 @@ This stores:
 
 ### Build and package image artifact
 
-Create and export image tarball to `output/go-core-mcp-agent.tar`:
+Create and export image tarball to `output/groovy-agent.tar`:
 
 ```sh
 ./scripts/package-image.sh
@@ -99,11 +99,11 @@ docker run --rm -it \
   -v "$(pwd)/artifacts/models:/models:ro" \
   -e LLAMA_MODEL_PATH=/models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
   -p 8080:8080 \
-  go-core-mcp-agent:local
+  groovy-agent:local
 ```
 
 The entrypoint starts `llama-server`, waits for readiness, then launches
-`go-core-mcp agent`.
+`groovy-agent agent`.
 
 ### Runtime environment variables
 
@@ -133,7 +133,7 @@ Build the binary and add it to an MCP client's configuration:
 {
   "mcpServers": {
     "coreutils": {
-      "command": "/absolute/path/to/go-core-mcp"
+      "command": "/absolute/path/to/groovy-agent"
     }
   }
 }
@@ -161,11 +161,11 @@ Example:
 ```sh
 export OPENAI_API_KEY=...
 go run . agent
-# go-core-mcp agent mode. Type 'exit' to quit.
+# groovy-agent agent mode. Type 'exit' to quit.
 > count lines in README.md
 README.md has 100 lines.
 > show the first 2 lines
-# go-core-mcp
+# groovy-agent
 ```
 
 The agent uses an OpenAI-compatible Chat Completions endpoint and exposes
@@ -187,9 +187,9 @@ printf 'b\na\n' | go run . sort
 
 Behavior summary:
 
-- `go-core-mcp` (no args) or `go-core-mcp mcp`: MCP server mode
-- `go-core-mcp agent`: interactive AI agent mode
-- `go-core-mcp <utility> ...`: direct coreutils command mode
+- `groovy-agent` (no args) or `groovy-agent mcp`: MCP server mode
+- `groovy-agent agent`: interactive AI agent mode
+- `groovy-agent <utility> ...`: direct coreutils command mode
 
 This is a focused, portable implementation rather than a claim of complete
 GNU coreutils compatibility. Unsupported options return an error instead of

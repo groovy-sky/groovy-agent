@@ -8,7 +8,7 @@ COPY go.mod ./
 COPY main.go ./
 COPY coreutils ./coreutils
 COPY internal ./internal
-RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -trimpath -ldflags='-s -w' -o /out/go-core-mcp .
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -trimpath -ldflags='-s -w' -o /out/groovy-agent .
 
 FROM ghcr.io/ggml-org/llama.cpp:server@sha256:092d1291f2bcf59ff727fa3af855fb9bd4759d6bff860f6fbfd5e3e377e12625 AS llama-runtime
 
@@ -47,7 +47,7 @@ ENV LLAMA_SERVER_HOST=127.0.0.1 \
     LLAMA_STARTUP_TIMEOUT=180 \
     LD_LIBRARY_PATH=/opt/llama
 
-COPY --from=go-builder /out/go-core-mcp /usr/local/bin/go-core-mcp
+COPY --from=go-builder /out/groovy-agent /usr/local/bin/groovy-agent
 COPY --from=llama-runtime /app /opt/llama
 COPY --from=model-fetch /models/ /models/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh

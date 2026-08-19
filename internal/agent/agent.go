@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/groovy-sky/go-core-mcp/coreutils"
+	"github.com/groovy-sky/groovy-agent/coreutils"
 )
 
 const (
@@ -94,7 +94,7 @@ func Run(ctx context.Context, input io.Reader, output, errOutput io.Writer) erro
 		return err
 	}
 	tools := openAITools()
-	fmt.Fprintln(output, "go-core-mcp agent mode. Type 'exit' to quit.")
+	fmt.Fprintln(output, "groovy-agent agent mode. Type 'exit' to quit.")
 	scanner := bufio.NewScanner(input)
 	messages := []message{{Role: "system", Content: systemPrompt}}
 	for {
