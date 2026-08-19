@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/groovy-sky/go-core-mcp/coreutils"
+	"github.com/groovy-sky/groovy-agent/coreutils"
 )
 
 const (
@@ -92,7 +92,7 @@ func handle(ctx context.Context, req request) (any, *rpcError) {
 		return map[string]any{
 			"protocolVersion": protocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-			"serverInfo":      map[string]string{"name": "go-core-mcp", "version": "0.1.0"},
+			"serverInfo":      map[string]string{"name": "groovy-agent", "version": "0.1.0"},
 		}, nil
 	case "ping":
 		return map[string]any{}, nil

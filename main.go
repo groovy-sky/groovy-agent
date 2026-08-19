@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/groovy-sky/go-core-mcp/coreutils"
-	"github.com/groovy-sky/go-core-mcp/internal/agent"
-	"github.com/groovy-sky/go-core-mcp/internal/mcp"
+	"github.com/groovy-sky/groovy-agent/coreutils"
+	"github.com/groovy-sky/groovy-agent/internal/agent"
+	"github.com/groovy-sky/groovy-agent/internal/mcp"
 )
 
 func main() {

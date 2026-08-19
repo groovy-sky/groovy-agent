@@ -73,7 +73,7 @@ export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://${LLAMA_SERVER_HOST}:${LLAMA_S
 export OPENAI_MODEL="${OPENAI_MODEL:-$LLAMA_MODEL_NAME}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-local-llama}"
 
-/usr/local/bin/go-core-mcp agent "$@" &
+/usr/local/bin/groovy-agent agent "$@" &
 agent_pid=$!
 
 while true; do

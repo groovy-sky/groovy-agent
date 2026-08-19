@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE_NAME="${IMAGE_NAME:-go-core-mcp-agent:local}"
-OUTPUT_PATH="${OUTPUT_PATH:-${ROOT_DIR}/output/go-core-mcp-agent.tar}"
+IMAGE_NAME="${IMAGE_NAME:-groovy-agent:local}"
+OUTPUT_PATH="${OUTPUT_PATH:-${ROOT_DIR}/output/groovy-agent.tar}"
 DOWNLOAD_MODEL_AT_BUILD="${DOWNLOAD_MODEL_AT_BUILD:-0}"
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
