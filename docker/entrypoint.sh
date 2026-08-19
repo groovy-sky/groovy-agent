@@ -33,8 +33,7 @@ llama_args=(
 )
 
 if [[ -n "$LLAMA_EXTRA_ARGS" ]]; then
-  # shellcheck disable=SC2206
-  extra_args=( $LLAMA_EXTRA_ARGS )
+  read -r -a extra_args <<< "$LLAMA_EXTRA_ARGS"
   llama_args+=("${extra_args[@]}")
 fi
 
@@ -77,19 +76,22 @@ export OPENAI_API_KEY="${OPENAI_API_KEY:-local-llama}"
 /usr/local/bin/go-core-mcp agent "$@" &
 agent_pid=$!
 
-set +e
-wait -n "$llama_pid" "$agent_pid"
-status=$?
-set -e
-
-if ! kill -0 "$llama_pid" 2>/dev/null; then
-  wait "$llama_pid" || true
-  kill -TERM "$agent_pid" 2>/dev/null || true
-  wait "$agent_pid" || true
-  echo "llama-server exited unexpectedly" >&2
-  exit 1
-fi
-
-kill -TERM "$llama_pid" 2>/dev/null || true
-wait "$llama_pid" || true
-exit "$status"
+while true; do
+  if ! kill -0 "$llama_pid" 2>/dev/null; then
+    wait "$llama_pid" || true
+    kill -TERM "$agent_pid" 2>/dev/null || true
+    wait "$agent_pid" || true
+    echo "llama-server exited unexpectedly" >&2
+    exit 1
+  fi
+  if ! kill -0 "$agent_pid" 2>/dev/null; then
+    set +e
+    wait "$agent_pid"
+    status=$?
+    set -e
+    kill -TERM "$llama_pid" 2>/dev/null || true
+    wait "$llama_pid" || true
+    exit "$status"
+  fi
+  sleep 1
+done

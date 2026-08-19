@@ -59,7 +59,7 @@ CPU-only inference can be slow. Tune with:
 - `LLAMA_THREADS` (default auto-detected)
 - `LLAMA_CTX_SIZE` (default `8192`)
 - `LLAMA_N_GPU_LAYERS` (default `0`, raise for GPU offload builds/runtimes)
-- `LLAMA_EXTRA_ARGS` (pass additional llama-server flags)
+- `LLAMA_EXTRA_ARGS` (space-separated extra flags; avoid values containing spaces, and **never** source this from untrusted input)
 
 ### Model provisioning (no GGUF committed to git)
 

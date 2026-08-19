@@ -239,7 +239,7 @@ func contentText(content any) (string, error) {
 		if text, ok := value["text"].(string); ok {
 			return text, nil
 		}
-		return "", nil
+		return "", errors.New("assistant content object did not contain a text field")
 	case nil:
 		return "", nil
 	default:

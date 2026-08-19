@@ -2,13 +2,15 @@
 
 FROM golang:1.24-bookworm AS go-builder
 WORKDIR /src
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 COPY go.mod ./
 COPY main.go ./
 COPY coreutils ./coreutils
 COPY internal ./internal
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /out/go-core-mcp .
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -trimpath -ldflags='-s -w' -o /out/go-core-mcp .
 
-FROM ghcr.io/ggml-org/llama.cpp:server AS llama-runtime
+FROM ghcr.io/ggml-org/llama.cpp:server@sha256:092d1291f2bcf59ff727fa3af855fb9bd4759d6bff860f6fbfd5e3e377e12625 AS llama-runtime
 
 FROM debian:bookworm-slim AS model-fetch
 ARG DOWNLOAD_MODEL=0
@@ -49,7 +51,8 @@ COPY --from=go-builder /out/go-core-mcp /usr/local/bin/go-core-mcp
 COPY --from=llama-runtime /app /opt/llama
 COPY --from=model-fetch /models/ /models/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+RUN test -x /opt/llama/llama-server \
+    && chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

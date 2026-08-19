@@ -15,23 +15,19 @@ curl_args=(
   --retry 5
   --retry-delay 2
   --retry-all-errors
+)
+
+if [[ -n "${HF_TOKEN:-}" ]]; then
+  curl_args+=(
+    --oauth2-bearer "$HF_TOKEN"
+  )
+fi
+
+curl_args+=(
   "$MODEL_URL"
   -o
   "$tmp_file"
 )
-
-if [[ -n "${HF_TOKEN:-}" ]]; then
-  curl_args=(
-    -fL
-    --retry 5
-    --retry-delay 2
-    --retry-all-errors
-    --oauth2-bearer "$HF_TOKEN"
-    "$MODEL_URL"
-    -o
-    "$tmp_file"
-  )
-fi
 
 curl "${curl_args[@]}"
 mv "$tmp_file" "$final_file"
