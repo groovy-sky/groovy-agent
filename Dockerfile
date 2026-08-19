@@ -32,10 +32,10 @@ RUN --mount=type=secret,id=hf_token \
       fi; \
     fi
 
-FROM debian:bookworm-slim AS runtime
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates curl libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+FROM llama-runtime AS runtime
+# Keep the final image on the pinned llama.cpp runtime base so the copied
+# llama-server binaries keep the exact glibc/libstdc++/OpenSSL runtime they were
+# built against.
 
 ENV LLAMA_SERVER_HOST=127.0.0.1 \
     LLAMA_SERVER_PORT=8080 \
