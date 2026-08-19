@@ -34,7 +34,7 @@ RUN --mount=type=secret,id=hf_token \
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates curl \
+    && apt-get install -y --no-install-recommends bash ca-certificates curl libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LLAMA_SERVER_HOST=127.0.0.1 \
