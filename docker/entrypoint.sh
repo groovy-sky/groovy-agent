@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Save the container's original stdin before any subshell or redirection may
+# replace fd 0 (e.g. the curl health-check loop).  The agent REPL needs it.
+exec 3<&0
+
 LLAMA_SERVER_HOST="${LLAMA_SERVER_HOST:-127.0.0.1}"
 LLAMA_SERVER_PORT="${LLAMA_SERVER_PORT:-8080}"
 LLAMA_MODEL_FILE="${LLAMA_MODEL_FILE:-Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf}"
@@ -73,9 +77,10 @@ export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://${LLAMA_SERVER_HOST}:${LLAMA_S
 export OPENAI_MODEL="${OPENAI_MODEL:-$LLAMA_MODEL_NAME}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-local-llama}"
 
-# Redirect stdin explicitly so the REPL keeps the container's interactive stdin
-# even though this is a non-interactive script (background jobs otherwise get /dev/null).
-/usr/local/bin/groovy-agent agent "$@" <&0 &
+# Redirect the saved original stdin (fd 3) explicitly so the REPL keeps the
+# container's interactive stdin even in this non-interactive script context
+# (background jobs otherwise get /dev/null as stdin).
+/usr/local/bin/groovy-agent agent "$@" <&3 &
 agent_pid=$!
 
 while true; do
