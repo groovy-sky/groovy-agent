@@ -74,6 +74,7 @@ func runHeadless(ctx context.Context, args []string) int {
 	yolo := flags.Bool("yolo", false, "Automatically approve mutations")
 	resumeID := flags.String("resume", "", "Resume from session id")
 	outputFormat := flags.String("output", "text", "Output format: text or json")
+	outputDir := flags.String("output-dir", outputDirDefault(), "Directory for persisted result JSON files")
 	if err := flags.Parse(args); err != nil {
 		return exitInvalidConfig
 	}
@@ -86,6 +87,7 @@ func runHeadless(ctx context.Context, args []string) int {
 		PlanMode:      *planMode,
 		Yolo:          *yolo,
 		ResumeID:      *resumeID,
+		OutputDir:     *outputDir,
 	})
 	if err != nil {
 		if *outputFormat == "json" {
@@ -120,4 +122,14 @@ func isPolicyDenied(err error) bool {
 	}
 	text := err.Error()
 	return strings.Contains(text, "approval_required_non_interactive") || strings.Contains(text, "plan_mode_denied")
+}
+
+// outputDirDefault returns the value of AGENT_OUTPUT_DIR if set, otherwise the
+// package-level default ("output"). This lets operators override the path via
+// environment without requiring a CLI flag.
+func outputDirDefault() string {
+	if v := os.Getenv("AGENT_OUTPUT_DIR"); v != "" {
+		return v
+	}
+	return agent.DefaultOutputDir
 }

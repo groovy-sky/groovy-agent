@@ -45,14 +45,17 @@ ENV LLAMA_SERVER_HOST=127.0.0.1 \
     LLAMA_THREADS=0 \
     LLAMA_N_GPU_LAYERS=0 \
     LLAMA_STARTUP_TIMEOUT=180 \
-    LD_LIBRARY_PATH=/opt/llama
+    LD_LIBRARY_PATH=/opt/llama \
+    AGENT_OUTPUT_DIR=/output
 
 COPY --from=go-builder /out/groovy-agent /usr/local/bin/groovy-agent
 COPY --from=llama-runtime /app /opt/llama
 COPY --from=model-fetch /models/ /models/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN test -x /opt/llama/llama-server \
-    && chmod +x /usr/local/bin/entrypoint.sh
+    && chmod +x /usr/local/bin/entrypoint.sh \
+    && mkdir -p /output
 
+VOLUME /output
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

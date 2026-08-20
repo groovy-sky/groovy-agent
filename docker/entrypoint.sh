@@ -5,6 +5,9 @@ set -euo pipefail
 # replace fd 0 (e.g. the curl health-check loop).  The agent REPL needs it.
 exec 3<&0
 
+# Ensure the output directory exists so result JSON files can always be written.
+mkdir -p "${AGENT_OUTPUT_DIR:-/output}"
+
 LLAMA_SERVER_HOST="${LLAMA_SERVER_HOST:-127.0.0.1}"
 LLAMA_SERVER_PORT="${LLAMA_SERVER_PORT:-8080}"
 LLAMA_MODEL_FILE="${LLAMA_MODEL_FILE:-Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf}"
