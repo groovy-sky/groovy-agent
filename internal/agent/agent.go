@@ -26,7 +26,7 @@ import (
 const (
 	defaultModel          = "gpt-4o-mini"
 	defaultBaseURL        = "https://api.openai.com/v1"
-	defaultRequestTimeout = 10 * time.Minute
+	defaultRequestTimeout = 3 * time.Hour
 	maxToolCallAttempts   = 8
 )
 

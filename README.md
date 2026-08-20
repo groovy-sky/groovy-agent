@@ -41,7 +41,7 @@ Inside the container:
 - `OPENAI_BASE_URL` defaults to `http://127.0.0.1:8080/v1`
 - `OPENAI_MODEL` defaults to `Qwen2.5-Coder-7B-Instruct-Q4_K_M`
 - `OPENAI_API_KEY` defaults to `local-llama` (override if needed)
-- `OPENAI_REQUEST_TIMEOUT` defaults to `10m`
+- `OPENAI_REQUEST_TIMEOUT` defaults to `3h`
 
 The agent exposes a safe coding toolset (workspace-confined file read/write,
 bounded search/listing, and fixed `git status`/`git diff` helpers) plus
@@ -132,7 +132,7 @@ Agent/OpenAI-compatible settings (all optional in this image):
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
 - `OPENAI_API_KEY`
-- `OPENAI_REQUEST_TIMEOUT` (Go duration, default `10m`; `0` disables the timeout)
+- `OPENAI_REQUEST_TIMEOUT` (Go duration, default `3h`; `0` disables the timeout)
 
 llama-server/container settings:
 
@@ -174,7 +174,7 @@ Environment variables:
 - `OPENAI_API_KEY` (required unless provided by container entrypoint defaults)
 - `OPENAI_MODEL` (optional, default: `gpt-4o-mini`)
 - `OPENAI_BASE_URL` (optional, default: `https://api.openai.com/v1`)
-- `OPENAI_REQUEST_TIMEOUT` (optional Go duration, default: `10m`; `0` disables)
+- `OPENAI_REQUEST_TIMEOUT` (optional Go duration, default: `3h`; `0` disables)
 
 Interactive slash commands:
 
