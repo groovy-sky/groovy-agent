@@ -186,6 +186,19 @@ func TestClientFromEnvRejectsInvalidRequestTimeout(t *testing.T) {
 	}
 }
 
+func TestClientFromEnvAllowsDisabledRequestTimeout(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_REQUEST_TIMEOUT", "0")
+
+	client, err := clientFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.httpClient.Timeout != 0 {
+		t.Fatalf("timeout = %s", client.httpClient.Timeout)
+	}
+}
+
 func TestClientFromEnvRequiresKey(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	if _, err := clientFromEnv(); err == nil {
