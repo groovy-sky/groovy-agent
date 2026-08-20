@@ -29,3 +29,17 @@ func TestRunHeadlessInvalidOutputFlag(t *testing.T) {
 		t.Fatalf("status = %d", status)
 	}
 }
+
+func TestOutputDirDefaultUsesEnvVar(t *testing.T) {
+	t.Setenv("AGENT_OUTPUT_DIR", "/custom/output")
+	if got := outputDirDefault(); got != "/custom/output" {
+		t.Fatalf("outputDirDefault = %q, want /custom/output", got)
+	}
+}
+
+func TestOutputDirDefaultFallsBackToPackageDefault(t *testing.T) {
+	t.Setenv("AGENT_OUTPUT_DIR", "")
+	if got := outputDirDefault(); got != "output" {
+		t.Fatalf("outputDirDefault = %q, want output", got)
+	}
+}

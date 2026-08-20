@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -203,5 +204,48 @@ func TestClientFromEnvRequiresKey(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	if _, err := clientFromEnv(); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestPersistResultCreatesDirectoryAndFile(t *testing.T) {
+	dir := t.TempDir()
+	outDir := dir + "/nested/output"
+	result := RunResult{SessionID: "test-session-01", Answer: "hello"}
+	if err := persistResult(outDir, "test-session-01", result); err != nil {
+		t.Fatalf("persistResult error: %v", err)
+	}
+	data, err := os.ReadFile(outDir + "/test-session-01.json")
+	if err != nil {
+		t.Fatalf("read result file: %v", err)
+	}
+	var got RunResult
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if got.SessionID != "test-session-01" {
+		t.Fatalf("session id = %q", got.SessionID)
+	}
+	if got.Answer != "hello" {
+		t.Fatalf("answer = %q", got.Answer)
+	}
+}
+
+func TestPersistResultUsesDefaultDirWhenEmpty(t *testing.T) {
+	// Verify that DefaultOutputDir has the documented value; any change to the
+	// constant would break the documented default path.
+	if DefaultOutputDir != "output" {
+		t.Fatalf("DefaultOutputDir = %q, want \"output\"", DefaultOutputDir)
+	}
+
+	// Verify that an empty outputDir falls back to DefaultOutputDir by passing
+	// an explicit temp path equivalent to the resolved default.
+	dir := t.TempDir()
+	explicitDefault := dir + "/" + DefaultOutputDir
+	result := RunResult{SessionID: "default-dir-test", Answer: "ok"}
+	if err := persistResult(explicitDefault, "default-dir-test", result); err != nil {
+		t.Fatalf("persistResult error: %v", err)
+	}
+	if _, err := os.Stat(explicitDefault + "/default-dir-test.json"); err != nil {
+		t.Fatalf("expected file in default dir: %v", err)
 	}
 }

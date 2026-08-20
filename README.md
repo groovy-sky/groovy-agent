@@ -125,6 +125,34 @@ docker run --rm -it \
 The entrypoint starts `llama-server`, waits for readiness, then launches
 `groovy-agent agent`.
 
+### Output persistence (headless mode)
+
+When running in headless (`run`) mode, each completed run writes a JSON result
+file to the output directory. Inside the container the default is `/output`
+(controlled by `AGENT_OUTPUT_DIR`). Mount a host directory there to receive the
+files automatically:
+
+```sh
+docker run --rm -it \
+  -v "$(pwd)/artifacts/models:/models:ro" \
+  -v "$(pwd)/output:/output" \
+  -e LLAMA_MODEL_PATH=/models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
+  -p 8080:8080 \
+  groovy-agent:local \
+  run -p "summarize the workspace" --yolo
+```
+
+Each run produces `<output-dir>/<session-id>.json` containing the session ID,
+final answer, and tool events. The directory is created automatically when the
+agent starts, so no manual setup is required.
+
+To change the output directory without remounting, set `AGENT_OUTPUT_DIR` or
+pass `--output-dir` on the command line:
+
+```sh
+go run . run -p "hello" --output-dir /tmp/results
+```
+
 ### Runtime environment variables
 
 Agent/OpenAI-compatible settings (all optional in this image):
@@ -133,6 +161,7 @@ Agent/OpenAI-compatible settings (all optional in this image):
 - `OPENAI_MODEL`
 - `OPENAI_API_KEY`
 - `OPENAI_REQUEST_TIMEOUT` (Go duration, default `3h`; `0` disables the timeout)
+- `AGENT_OUTPUT_DIR` (default `/output` in the container, `output` on bare metal)
 
 llama-server/container settings:
 

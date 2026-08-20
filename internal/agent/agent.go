@@ -94,11 +94,17 @@ var (
 	supportedUtilitySet    map[string]struct{}
 )
 
+const DefaultOutputDir = "output"
+
 type Options struct {
 	WorkspacePath string
 	PlanMode      bool
 	Yolo          bool
 	ResumeID      string
+	// OutputDir is the directory where headless run results are persisted as
+	// JSON files. It is created automatically when the agent writes output.
+	// Defaults to DefaultOutputDir ("output") when empty.
+	OutputDir string
 }
 
 type RunResult struct {
@@ -268,11 +274,37 @@ func RunHeadless(ctx context.Context, prompt string, options Options) (RunResult
 	for _, event := range events {
 		if event.DeniedCode == "approval_required_non_interactive" || event.DeniedCode == "plan_mode_denied" || event.DeniedCode == "approval_denied" {
 			_ = storeSnapshot(store, sessionID, createdAt, updated)
-			return RunResult{SessionID: sessionID, Answer: answer, Events: events}, errors.New(event.DeniedCode)
+			deniedResult := RunResult{SessionID: sessionID, Answer: answer, Events: events}
+			_ = persistResult(options.OutputDir, sessionID, deniedResult)
+			return deniedResult, errors.New(event.DeniedCode)
 		}
 	}
 	_ = storeSnapshot(store, sessionID, createdAt, updated)
-	return RunResult{SessionID: sessionID, Answer: answer, Events: events}, nil
+	result := RunResult{SessionID: sessionID, Answer: answer, Events: events}
+	_ = persistResult(options.OutputDir, sessionID, result)
+	return result, nil
+}
+
+// persistResult writes a JSON file for result into outputDir, creating the
+// directory automatically. Errors are non-fatal so that a missing or
+// unwritable output directory never prevents the agent from returning its
+// answer.
+func persistResult(outputDir, sessionID string, result RunResult) error {
+	if outputDir == "" {
+		outputDir = DefaultOutputDir
+	}
+	if err := os.MkdirAll(outputDir, 0o700); err != nil {
+		return fmt.Errorf("create output directory: %w", err)
+	}
+	path := filepath.Join(outputDir, sessionID+".json")
+	data, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("marshal result: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("write result file: %w", err)
+	}
+	return nil
 }
 
 func handleSlashCommand(command string, state *interactiveState, baseMessages []message, policy *approval.Policy, ws *workspace.Workspace, store *session.Store, output io.Writer) (bool, error) {
