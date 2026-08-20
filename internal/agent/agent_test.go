@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/groovy-sky/groovy-agent/internal/approval"
 	"github.com/groovy-sky/groovy-agent/internal/workspace"
@@ -143,6 +144,7 @@ func TestClientFromEnvReadsOverrides(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "token")
 	t.Setenv("OPENAI_MODEL", "local-model")
 	t.Setenv("OPENAI_BASE_URL", "http://127.0.0.1:8080/v1/")
+	t.Setenv("OPENAI_REQUEST_TIMEOUT", "15m")
 
 	client, err := clientFromEnv()
 	if err != nil {
@@ -156,6 +158,31 @@ func TestClientFromEnvReadsOverrides(t *testing.T) {
 	}
 	if client.baseURL != "http://127.0.0.1:8080/v1" {
 		t.Fatalf("baseURL = %q", client.baseURL)
+	}
+	if client.httpClient.Timeout != 15*time.Minute {
+		t.Fatalf("timeout = %s", client.httpClient.Timeout)
+	}
+}
+
+func TestClientFromEnvUsesLongRequestTimeoutByDefault(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_REQUEST_TIMEOUT", "")
+
+	client, err := clientFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.httpClient.Timeout != defaultRequestTimeout {
+		t.Fatalf("timeout = %s", client.httpClient.Timeout)
+	}
+}
+
+func TestClientFromEnvRejectsInvalidRequestTimeout(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_REQUEST_TIMEOUT", "-1s")
+
+	if _, err := clientFromEnv(); err == nil {
+		t.Fatal("expected error")
 	}
 }
 
