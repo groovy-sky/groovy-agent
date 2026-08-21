@@ -837,9 +837,6 @@ func parseTextualToolCall(text string, tools []toolDefinition, fallbackID string
 	}
 	candidate, ok := extractStandaloneJSONObject(text)
 	if !ok {
-		if looksLikeMalformedTextualToolCall(text, tools) {
-			return toolCall{}, false, fmt.Errorf("assistant returned malformed textual tool call (preview: %q)", previewText(text, 200))
-		}
 		return toolCall{}, false, nil
 	}
 	var payload map[string]json.RawMessage
@@ -858,11 +855,11 @@ func parseTextualToolCall(text string, tools []toolDefinition, fallbackID string
 		switch key {
 		case "name", "arguments", "id", "type":
 		default:
-			return toolCall{}, false, fmt.Errorf("assistant returned malformed textual tool call: unexpected field %q", key)
+			return toolCall{}, false, nil
 		}
 	}
 	if !hasName || !hasArguments {
-		return toolCall{}, false, errors.New("assistant returned malformed textual tool call: missing name or arguments")
+		return toolCall{}, false, nil
 	}
 	var envelope struct {
 		ID        string          `json:"id"`
@@ -873,24 +870,24 @@ func parseTextualToolCall(text string, tools []toolDefinition, fallbackID string
 	decoder := json.NewDecoder(strings.NewReader(candidate))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&envelope); err != nil {
-		return toolCall{}, false, fmt.Errorf("assistant returned malformed textual tool call: %w", err)
+		return toolCall{}, false, nil
 	}
 	if strings.TrimSpace(envelope.Name) == "" {
-		return toolCall{}, false, errors.New("assistant returned malformed textual tool call: name is required")
+		return toolCall{}, false, nil
 	}
 	if envelope.Type != "" && envelope.Type != "function" {
-		return toolCall{}, false, fmt.Errorf("assistant returned malformed textual tool call: type %q is not supported", envelope.Type)
+		return toolCall{}, false, nil
 	}
 	toolNames := make(map[string]struct{}, len(tools))
 	for _, tool := range tools {
 		toolNames[tool.Function.Name] = struct{}{}
 	}
 	if _, ok := toolNames[envelope.Name]; !ok {
-		return toolCall{}, false, fmt.Errorf("assistant returned malformed textual tool call: unsupported tool %q", envelope.Name)
+		return toolCall{}, false, nil
 	}
 	arguments, err := normalizeTextualToolArguments(envelope.Arguments)
 	if err != nil {
-		return toolCall{}, false, fmt.Errorf("assistant returned malformed textual tool call: %w", err)
+		return toolCall{}, false, nil
 	}
 	callID := strings.TrimSpace(envelope.ID)
 	if callID == "" {
@@ -935,34 +932,6 @@ func normalizeTextualToolArguments(raw json.RawMessage) (map[string]any, error) 
 	default:
 		return nil, errors.New("arguments must be a JSON object or a JSON-encoded object")
 	}
-}
-
-func looksLikeMalformedTextualToolCall(text string, tools []toolDefinition) bool {
-	trimmed := strings.TrimSpace(text)
-	if !strings.HasPrefix(trimmed, "```") {
-		return false
-	}
-	newline := strings.IndexByte(trimmed, '\n')
-	if newline == -1 {
-		return false
-	}
-	language := strings.TrimSpace(trimmed[3:newline])
-	if language != "" && !strings.EqualFold(language, "json") {
-		return false
-	}
-	fenceEnd := strings.LastIndex(trimmed, "```")
-	if fenceEnd <= newline || strings.TrimSpace(trimmed[fenceEnd+3:]) != "" {
-		return false
-	}
-	candidate := trimmed[newline+1 : fenceEnd]
-	for _, tool := range tools {
-		if strings.Contains(candidate, `"name"`) &&
-			strings.Contains(candidate, tool.Function.Name) &&
-			strings.Contains(candidate, `"arguments"`) {
-			return true
-		}
-	}
-	return false
 }
 
 func extractStandaloneJSONObject(text string) (string, bool) {

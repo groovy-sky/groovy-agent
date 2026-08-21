@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -165,7 +166,7 @@ func TestCompleteTurnTextualToolCallExecutesAndContinues(t *testing.T) {
 	}
 }
 
-func TestCompleteTurnMalformedTextualToolCallFails(t *testing.T) {
+func TestCompleteTurnMalformedTextualToolCallTreatedAsText(t *testing.T) {
 	dispatcher := &recordingDispatcher{}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		var payload chatRequest
@@ -180,15 +181,39 @@ func TestCompleteTurnMalformedTextualToolCallFails(t *testing.T) {
 	defer server.Close()
 
 	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
-	_, _, err := completeTurnWithRuntime(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "create file"}}, openAITools(), dispatcher)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "textual tool call") {
+	_, answer, err := completeTurnWithRuntime(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "create file"}}, openAITools(), dispatcher)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if answer == "" {
+		t.Fatal("expected non-empty answer")
 	}
 	if len(dispatcher.calls) != 0 {
 		t.Fatalf("dispatcher call count = %d", len(dispatcher.calls))
+	}
+}
+
+func TestCompleteTurnFencedJSONExtraBraceTreatedAsText(t *testing.T) {
+	// Reproduces the Qwen2.5 case: fenced JSON with an extra closing brace must not
+	// abort the turn; it must be returned as ordinary assistant text without dispatching.
+	const fencedResponse = "```json\n{\"name\":\"write_file\",\"arguments\":{\"path\":\"date.txt\",\"content\":\"$(date)\"}}} \n```"
+	dispatcher := &recordingDispatcher{}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		encoded, _ := json.Marshal(fencedResponse)
+		fmt.Fprintf(writer, `{"choices":[{"message":{"role":"assistant","content":%s}}]}`, encoded)
+	}))
+	defer server.Close()
+
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
+	_, answer, err := completeTurnWithRuntime(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "store current date in date.txt file"}}, openAITools(), dispatcher)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if answer == "" {
+		t.Fatal("expected non-empty answer")
+	}
+	if len(dispatcher.calls) != 0 {
+		t.Fatalf("no tool should be dispatched, got %d calls", len(dispatcher.calls))
 	}
 }
 
