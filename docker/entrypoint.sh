@@ -30,6 +30,7 @@ if [[ "$LLAMA_THREADS" == "0" ]]; then
 fi
 
 llama_args=(
+  --jinja
   --host "$LLAMA_SERVER_HOST"
   --port "$LLAMA_SERVER_PORT"
   --model "$LLAMA_MODEL_PATH"
@@ -80,10 +81,14 @@ export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://${LLAMA_SERVER_HOST}:${LLAMA_S
 export OPENAI_MODEL="${OPENAI_MODEL:-$LLAMA_MODEL_NAME}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-local-llama}"
 
-# Redirect the saved original stdin (fd 3) explicitly so the REPL keeps the
-# container's interactive stdin even in this non-interactive script context
-# (background jobs otherwise get /dev/null as stdin).
-/usr/local/bin/groovy-agent agent "$@" <&3 &
+# Forward subcommand: if the first argument is "agent" or "run", pass all args
+# directly. Otherwise prepend "agent" so bare extra flags (like --workspace)
+# still reach agent mode.
+if [[ "${1:-}" == "agent" || "${1:-}" == "run" ]]; then
+  /usr/local/bin/groovy-agent "$@" <&3 &
+else
+  /usr/local/bin/groovy-agent agent "$@" <&3 &
+fi
 agent_pid=$!
 
 while true; do

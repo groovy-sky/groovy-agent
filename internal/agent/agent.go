@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,13 +19,15 @@ import (
 	"github.com/groovy-sky/groovy-agent/coreutils"
 	"github.com/groovy-sky/groovy-agent/internal/approval"
 	"github.com/groovy-sky/groovy-agent/internal/gittools"
+	"github.com/groovy-sky/groovy-agent/internal/mcp"
 	"github.com/groovy-sky/groovy-agent/internal/session"
 	"github.com/groovy-sky/groovy-agent/internal/workspace"
 )
 
 const (
-	defaultModel          = "gpt-4o-mini"
-	defaultBaseURL        = "https://api.openai.com/v1"
+	// defaultBaseURL is the local llama.cpp endpoint. Remote endpoints are
+	// rejected to enforce local-model-only inference.
+	defaultBaseURL        = "http://127.0.0.1:8080/v1"
 	defaultRequestTimeout = 3 * time.Hour
 	maxToolCallAttempts   = 8
 )
@@ -128,6 +130,189 @@ type toolRuntime struct {
 	events    *[]ToolEvent
 }
 
+// toolDispatcher routes model tool calls to an implementation.
+type toolDispatcher interface {
+	Execute(ctx context.Context, call toolCall) string
+}
+
+// Execute makes toolRuntime implement toolDispatcher for unit tests that
+// bypass the MCP transport.
+func (runtime *toolRuntime) Execute(ctx context.Context, call toolCall) string {
+	return executeToolCallWithRuntime(ctx, runtime, call)
+}
+
+// mcpClient is a JSON-RPC 2.0 MCP client that communicates over a pair of
+// io pipes connecting to an in-process MCP server goroutine.
+type mcpClient struct {
+	enc *json.Encoder
+	dec *json.Decoder
+	mu  sync.Mutex
+	id  int
+}
+
+func newMCPClient(r io.Reader, w io.Writer) *mcpClient {
+	return &mcpClient{enc: json.NewEncoder(w), dec: json.NewDecoder(r)}
+}
+
+// rpcCall sends a JSON-RPC request and returns the result.
+func (c *mcpClient) rpcCall(method string, params any) (json.RawMessage, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.id++
+	type req struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      int    `json:"id"`
+		Method  string `json:"method"`
+		Params  any    `json:"params,omitempty"`
+	}
+	if err := c.enc.Encode(req{JSONRPC: "2.0", ID: c.id, Method: method, Params: params}); err != nil {
+		return nil, fmt.Errorf("MCP send %s: %w", method, err)
+	}
+	var resp struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := c.dec.Decode(&resp); err != nil {
+		return nil, fmt.Errorf("MCP recv %s: %w", method, err)
+	}
+	if resp.Error != nil {
+		return nil, fmt.Errorf("MCP error %d: %s", resp.Error.Code, resp.Error.Message)
+	}
+	return resp.Result, nil
+}
+
+// rpcNotify sends a JSON-RPC notification (no response expected).
+func (c *mcpClient) rpcNotify(method string, params any) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	type notif struct {
+		JSONRPC string `json:"jsonrpc"`
+		Method  string `json:"method"`
+		Params  any    `json:"params,omitempty"`
+	}
+	return c.enc.Encode(notif{JSONRPC: "2.0", Method: method, Params: params})
+}
+
+func (c *mcpClient) initialize() error {
+	_, err := c.rpcCall("initialize", map[string]any{
+		"protocolVersion": "2025-06-18",
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "groovy-agent", "version": "0.1.0"},
+	})
+	if err != nil {
+		return err
+	}
+	return c.rpcNotify("notifications/initialized", nil)
+}
+
+func (c *mcpClient) listTools() ([]toolDefinition, error) {
+	result, err := c.rpcCall("tools/list", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Tools []struct {
+			Name        string         `json:"name"`
+			Description string         `json:"description"`
+			InputSchema map[string]any `json:"inputSchema"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(result, &resp); err != nil {
+		return nil, fmt.Errorf("parse tools/list: %w", err)
+	}
+	tools := make([]toolDefinition, 0, len(resp.Tools))
+	for _, t := range resp.Tools {
+		tools = append(tools, functionTool(t.Name, t.Description, t.InputSchema))
+	}
+	return tools, nil
+}
+
+func (c *mcpClient) callTool(_ context.Context, name string, args any) (string, error) {
+	// Normalise args to json.RawMessage.
+	var argsRaw json.RawMessage
+	switch v := args.(type) {
+	case string:
+		if v == "" {
+			argsRaw = json.RawMessage("{}")
+		} else {
+			argsRaw = json.RawMessage(v)
+		}
+	case nil:
+		argsRaw = json.RawMessage("{}")
+	default:
+		data, err := json.Marshal(v)
+		if err != nil {
+			return "", err
+		}
+		argsRaw = data
+	}
+	result, err := c.rpcCall("tools/call", map[string]any{
+		"name":      name,
+		"arguments": argsRaw,
+	})
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(result, &resp); err != nil {
+		return "", fmt.Errorf("parse tools/call: %w", err)
+	}
+	var parts []string
+	for _, c := range resp.Content {
+		if c.Type == "text" {
+			parts = append(parts, c.Text)
+		}
+	}
+	return strings.Join(parts, ""), nil
+}
+
+// mcpDispatcher routes model tool calls through the in-process MCP client.
+type mcpDispatcher struct {
+	client *mcpClient
+}
+
+func (d *mcpDispatcher) Execute(ctx context.Context, call toolCall) string {
+	output, err := d.client.callTool(ctx, call.Function.Name, call.Function.Arguments)
+	if err != nil {
+		result := toolResult{Success: false, Error: fmt.Sprintf("MCP tool call failed: %v", err)}
+		return marshalToolResult(result)
+	}
+	return output
+}
+
+// startInProcessMCP starts an MCP server goroutine connected via in-process
+// pipes. It returns the client (already initialized) and a stop function.
+// The server shuts down when stop is called or ctx is cancelled.
+func startInProcessMCP(ctx context.Context, cfg mcp.Config) (*mcpClient, func(), error) {
+	serverInR, serverInW := io.Pipe()
+	serverOutR, serverOutW := io.Pipe()
+
+	srvCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		defer serverOutW.Close()
+		_ = mcp.ServeWithConfig(srvCtx, serverInR, serverOutW, cfg)
+	}()
+
+	client := newMCPClient(serverOutR, serverInW)
+	stop := func() {
+		cancel()
+		_ = serverInW.Close()
+	}
+	if err := client.initialize(); err != nil {
+		stop()
+		return nil, nil, fmt.Errorf("MCP initialize: %w", err)
+	}
+	return client, stop, nil
+}
+
 type interactiveState struct {
 	sessionID string
 	createdAt time.Time
@@ -136,7 +321,7 @@ type interactiveState struct {
 
 // Run starts interactive terminal agent mode.
 func Run(ctx context.Context, input io.Reader, output, errOutput io.Writer, options Options) error {
-	client, err := clientFromEnv()
+	chatClient, err := clientFromEnv()
 	if err != nil {
 		return err
 	}
@@ -171,7 +356,47 @@ func Run(ctx context.Context, input io.Reader, output, errOutput io.Writer, opti
 
 	lineReader := newLineReader(input)
 	policy := approval.Policy{PlanMode: options.PlanMode, Yolo: options.Yolo, Interactive: true}
-	tools := openAITools()
+
+	promptFn := func(preview string) (bool, error) {
+		if strings.TrimSpace(preview) != "" {
+			fmt.Fprintln(output, preview)
+		}
+		answer, promptErr := lineReader.ReadLine("Approve mutation? [y/N]: ", output)
+		if promptErr != nil {
+			return false, promptErr
+		}
+		answer = strings.ToLower(strings.TrimSpace(answer))
+		return answer == "y" || answer == "yes", nil
+	}
+
+	// currentOnEvent is updated each turn so the single MCP server can record
+	// events into the correct per-turn slice without restarting.
+	var currentOnEvent func(string, bool, *bool, string, string)
+
+	// Start the in-process MCP server once before the loop.
+	// Config.Policy is a pointer so plan-mode changes made via /plan take effect
+	// immediately without restarting the server.
+	mcpCfg := mcp.Config{
+		Workspace: ws,
+		Policy:    &policy,
+		Prompt:    promptFn,
+		OnEvent: func(toolName string, success bool, approved *bool, code, reason string) {
+			if currentOnEvent != nil {
+				currentOnEvent(toolName, success, approved, code, reason)
+			}
+		},
+	}
+	mcpCli, stopMCP, mcpErr := startInProcessMCP(ctx, mcpCfg)
+	if mcpErr != nil {
+		return fmt.Errorf("MCP start error: %w", mcpErr)
+	}
+	defer stopMCP()
+	tools, mcpErr := mcpCli.listTools()
+	if mcpErr != nil {
+		return fmt.Errorf("MCP list tools error: %w", mcpErr)
+	}
+	dispatcher := &mcpDispatcher{client: mcpCli}
+
 	fmt.Fprintln(output, "groovy-agent agent mode. Type 'exit' to quit. Use /help for commands.")
 	for {
 		line, readErr := lineReader.ReadLine("", output)
@@ -200,23 +425,11 @@ func Run(ctx context.Context, input io.Reader, output, errOutput io.Writer, opti
 
 		turn := append(append([]message{}, state.messages...), message{Role: "user", Content: line})
 		events := make([]ToolEvent, 0)
-		runtime := &toolRuntime{
-			workspace: ws,
-			policy:    policy,
-			events:    &events,
-			prompt: func(preview string) (bool, error) {
-				if strings.TrimSpace(preview) != "" {
-					fmt.Fprintln(output, preview)
-				}
-				answer, promptErr := lineReader.ReadLine("Approve mutation? [y/N]: ", output)
-				if promptErr != nil {
-					return false, promptErr
-				}
-				answer = strings.ToLower(strings.TrimSpace(answer))
-				return answer == "y" || answer == "yes", nil
-			},
+		currentOnEvent = func(toolName string, success bool, approved *bool, code, reason string) {
+			recordEvent(&events, ToolEvent{Tool: toolName, Success: success, Approved: approved, DeniedCode: code, DeniedReason: reason})
 		}
-		updated, assistantAnswer, turnErr := completeTurnWithRuntime(ctx, client, turn, tools, runtime)
+		updated, assistantAnswer, turnErr := completeTurnWithRuntime(ctx, chatClient, turn, tools, dispatcher)
+		currentOnEvent = nil
 		if turnErr != nil {
 			fmt.Fprintf(errOutput, "agent error: %v\n", turnErr)
 			continue
@@ -231,7 +444,7 @@ func RunHeadless(ctx context.Context, prompt string, options Options) (RunResult
 	if strings.TrimSpace(prompt) == "" {
 		return RunResult{}, errors.New("prompt is required")
 	}
-	client, err := clientFromEnv()
+	chatClient, err := clientFromEnv()
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -258,16 +471,25 @@ func RunHeadless(ctx context.Context, prompt string, options Options) (RunResult
 	}
 	turn := append(messages, message{Role: "user", Content: prompt})
 	events := make([]ToolEvent, 0)
-	runtime := &toolRuntime{
-		workspace: ws,
-		policy: approval.Policy{
-			PlanMode:    options.PlanMode,
-			Yolo:        options.Yolo,
-			Interactive: false,
+	policy := approval.Policy{PlanMode: options.PlanMode, Yolo: options.Yolo, Interactive: false}
+	mcpCfg := mcp.Config{
+		Workspace: ws,
+		Policy:    &policy,
+		OnEvent: func(toolName string, success bool, approved *bool, code, reason string) {
+			recordEvent(&events, ToolEvent{Tool: toolName, Success: success, Approved: approved, DeniedCode: code, DeniedReason: reason})
 		},
-		events: &events,
 	}
-	updated, answer, err := completeTurnWithRuntime(ctx, client, turn, openAITools(), runtime)
+	mcpCli, stopMCP, mcpErr := startInProcessMCP(ctx, mcpCfg)
+	if mcpErr != nil {
+		return RunResult{SessionID: sessionID, Events: events}, mcpErr
+	}
+	defer stopMCP()
+	tools, mcpErr := mcpCli.listTools()
+	if mcpErr != nil {
+		return RunResult{SessionID: sessionID, Events: events}, mcpErr
+	}
+	dispatcher := &mcpDispatcher{client: mcpCli}
+	updated, answer, err := completeTurnWithRuntime(ctx, chatClient, turn, tools, dispatcher)
 	if err != nil {
 		return RunResult{SessionID: sessionID, Events: events}, err
 	}
@@ -391,11 +613,14 @@ func clientFromEnv() (*apiClient, error) {
 	}
 	model := strings.TrimSpace(os.Getenv("OPENAI_MODEL"))
 	if model == "" {
-		model = defaultModel
+		return nil, errors.New("OPENAI_MODEL is required: set it to the local model alias configured in llama-server")
 	}
 	baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
 	if baseURL == "" {
 		baseURL = defaultBaseURL
+	}
+	if !isLocalURL(baseURL) {
+		return nil, fmt.Errorf("OPENAI_BASE_URL %q is not a local endpoint: only loopback addresses (127.0.0.1, localhost, ::1) are allowed", baseURL)
 	}
 	requestTimeout := defaultRequestTimeout
 	if value := strings.TrimSpace(os.Getenv("OPENAI_REQUEST_TIMEOUT")); value != "" {
@@ -411,6 +636,18 @@ func clientFromEnv() (*apiClient, error) {
 		model:      model,
 		baseURL:    strings.TrimRight(baseURL, "/"),
 	}, nil
+}
+
+// isLocalURL returns true if rawURL's host is a loopback address.
+// It accepts 127.0.0.1, localhost, ::1, and any port on those hosts.
+// httptest.NewServer also binds to 127.0.0.1, so test URLs pass as well.
+func isLocalURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
 }
 
 func (client *apiClient) Complete(ctx context.Context, messages []message, tools []toolDefinition) (message, error) {
@@ -464,7 +701,7 @@ func completeTurn(ctx context.Context, client chatClient, messages []message, to
 	return completeTurnWithRuntime(ctx, client, messages, tools, runtime)
 }
 
-func completeTurnWithRuntime(ctx context.Context, client chatClient, messages []message, tools []toolDefinition, runtime *toolRuntime) ([]message, string, error) {
+func completeTurnWithRuntime(ctx context.Context, client chatClient, messages []message, tools []toolDefinition, dispatcher toolDispatcher) ([]message, string, error) {
 	for i := 0; i < maxToolCallAttempts; i++ {
 		assistantMessage, err := client.Complete(ctx, messages, tools)
 		if err != nil {
@@ -486,7 +723,7 @@ func completeTurnWithRuntime(ctx context.Context, client chatClient, messages []
 			if call.ID == "" {
 				return nil, "", errors.New("malformed tool call: missing id")
 			}
-			toolOutput := executeToolCallWithRuntime(ctx, runtime, call)
+			toolOutput := dispatcher.Execute(ctx, call)
 			messages = append(messages, message{
 				Role:       "tool",
 				ToolCallID: call.ID,
@@ -703,7 +940,7 @@ func executeToolCallWithRuntime(ctx context.Context, runtime *toolRuntime, call 
 		if !allowed {
 			return marshalToolResult(denied)
 		}
-		applyResult, err := applyUnifiedPatch(runtime.workspace, input.Patch)
+		applyResult, err := runtime.workspace.ApplyPatch(input.Patch)
 		if err != nil {
 			result.Error = err.Error()
 			return marshalToolResult(result)
@@ -984,207 +1221,3 @@ func storeSnapshot(store *session.Store, sessionID string, createdAt time.Time, 
 	return store.SaveSnapshot(sessionID, stored, createdAt, time.Now())
 }
 
-// ApplyPatchResult is returned from apply_patch.
-type ApplyPatchResult struct {
-	Files []string `json:"files"`
-}
-
-type patchFile struct {
-	Path  string
-	Hunks []patchHunk
-}
-
-type patchHunk struct {
-	OldStart int
-	Lines    []patchLine
-}
-
-type patchLine struct {
-	Kind byte
-	Text string
-}
-
-func applyUnifiedPatch(workspace *workspace.Workspace, patchText string) (ApplyPatchResult, error) {
-	files, err := parseUnifiedPatch(patchText)
-	if err != nil {
-		return ApplyPatchResult{}, err
-	}
-	updated := make(map[string]string, len(files))
-	for _, filePatch := range files {
-		resolved, err := workspace.ResolveExistingPath(filePatch.Path)
-		if err != nil {
-			return ApplyPatchResult{}, err
-		}
-		info, err := os.Stat(resolved)
-		if err != nil {
-			return ApplyPatchResult{}, err
-		}
-		if !info.Mode().IsRegular() {
-			return ApplyPatchResult{}, fmt.Errorf("patch target %q is not a regular file", filePatch.Path)
-		}
-		contents, err := os.ReadFile(resolved)
-		if err != nil {
-			return ApplyPatchResult{}, err
-		}
-		applied, err := applyPatchToContent(string(contents), filePatch)
-		if err != nil {
-			return ApplyPatchResult{}, fmt.Errorf("apply patch to %s: %w", filePatch.Path, err)
-		}
-		updated[filePatch.Path] = applied
-	}
-	for path, contents := range updated {
-		if err := workspace.WriteFile(path, contents); err != nil {
-			return ApplyPatchResult{}, err
-		}
-	}
-	paths := make([]string, 0, len(updated))
-	for path := range updated {
-		paths = append(paths, path)
-	}
-	return ApplyPatchResult{Files: paths}, nil
-}
-
-func parseUnifiedPatch(patchText string) ([]patchFile, error) {
-	if strings.Contains(patchText, "GIT binary patch") || strings.Contains(patchText, "Binary files") {
-		return nil, errors.New("binary patches are not supported")
-	}
-	lines := strings.Split(strings.ReplaceAll(patchText, "\r\n", "\n"), "\n")
-	files := make([]patchFile, 0)
-	var current *patchFile
-	for index := 0; index < len(lines); index++ {
-		line := lines[index]
-		switch {
-		case strings.HasPrefix(line, "rename "), strings.HasPrefix(line, "copy "), strings.HasPrefix(line, "new file mode"), strings.HasPrefix(line, "deleted file mode"):
-			return nil, errors.New("rename/copy/new/delete metadata is not supported")
-		case strings.HasPrefix(line, "diff --git "):
-			continue
-		case strings.HasPrefix(line, "--- "):
-			if index+1 >= len(lines) || !strings.HasPrefix(lines[index+1], "+++ ") {
-				return nil, errors.New("malformed patch: missing +++ header")
-			}
-			oldPath := strings.TrimSpace(strings.TrimPrefix(line, "--- "))
-			newPath := strings.TrimSpace(strings.TrimPrefix(lines[index+1], "+++ "))
-			if oldPath == "/dev/null" || newPath == "/dev/null" {
-				return nil, errors.New("file create/delete patches are not supported; use write_file")
-			}
-			oldPath = normalizePatchPath(oldPath)
-			newPath = normalizePatchPath(newPath)
-			if oldPath != newPath {
-				return nil, fmt.Errorf("path rename in patch is not supported: %s -> %s", oldPath, newPath)
-			}
-			files = append(files, patchFile{Path: oldPath})
-			current = &files[len(files)-1]
-			index++
-		case strings.HasPrefix(line, "@@ "):
-			if current == nil {
-				return nil, errors.New("malformed patch: hunk without file header")
-			}
-			oldStart, err := parseOldStart(line)
-			if err != nil {
-				return nil, err
-			}
-			hunk := patchHunk{OldStart: oldStart}
-			for index+1 < len(lines) {
-				next := lines[index+1]
-				if strings.HasPrefix(next, "@@ ") || strings.HasPrefix(next, "--- ") || strings.HasPrefix(next, "diff --git ") {
-					break
-				}
-				index++
-				if next == "" && index == len(lines)-1 {
-					break
-				}
-				if strings.HasPrefix(next, "\\ No newline at end of file") {
-					return nil, errors.New("patch marker '\\ No newline at end of file' is not supported")
-				}
-				if len(next) == 0 {
-					hunk.Lines = append(hunk.Lines, patchLine{Kind: ' ', Text: ""})
-					continue
-				}
-				kind := next[0]
-				if kind != ' ' && kind != '+' && kind != '-' {
-					return nil, fmt.Errorf("malformed hunk line: %q", next)
-				}
-				hunk.Lines = append(hunk.Lines, patchLine{Kind: kind, Text: next[1:]})
-			}
-			current.Hunks = append(current.Hunks, hunk)
-		}
-	}
-	if len(files) == 0 {
-		return nil, errors.New("no file changes found in patch")
-	}
-	for _, filePatch := range files {
-		if len(filePatch.Hunks) == 0 {
-			return nil, fmt.Errorf("patch for %s has no hunks", filePatch.Path)
-		}
-	}
-	return files, nil
-}
-
-func parseOldStart(header string) (int, error) {
-	parts := strings.Split(header, " ")
-	if len(parts) < 3 {
-		return 0, fmt.Errorf("malformed hunk header %q", header)
-	}
-	oldRange := strings.TrimPrefix(parts[1], "-")
-	comma := strings.IndexByte(oldRange, ',')
-	if comma >= 0 {
-		oldRange = oldRange[:comma]
-	}
-	value, err := strconv.Atoi(oldRange)
-	if err != nil || value <= 0 {
-		return 0, fmt.Errorf("malformed hunk header %q", header)
-	}
-	return value, nil
-}
-
-func normalizePatchPath(path string) string {
-	path = strings.TrimSpace(path)
-	path = strings.TrimPrefix(path, "a/")
-	path = strings.TrimPrefix(path, "b/")
-	return filepath.ToSlash(path)
-}
-
-func applyPatchToContent(content string, filePatch patchFile) (string, error) {
-	hasTrailingNewline := strings.HasSuffix(content, "\n")
-	base := strings.ReplaceAll(content, "\r\n", "\n")
-	lines := strings.Split(base, "\n")
-	if hasTrailingNewline && len(lines) > 0 {
-		lines = lines[:len(lines)-1]
-	}
-	result := make([]string, 0, len(lines))
-	position := 0
-	for _, hunk := range filePatch.Hunks {
-		target := hunk.OldStart - 1
-		if target < position || target > len(lines) {
-			return "", fmt.Errorf("hunk start %d out of range", hunk.OldStart)
-		}
-		result = append(result, lines[position:target]...)
-		cursor := target
-		for _, line := range hunk.Lines {
-			switch line.Kind {
-			case ' ':
-				if cursor >= len(lines) || lines[cursor] != line.Text {
-					return "", fmt.Errorf("context mismatch at line %d", cursor+1)
-				}
-				result = append(result, lines[cursor])
-				cursor++
-			case '-':
-				if cursor >= len(lines) || lines[cursor] != line.Text {
-					return "", fmt.Errorf("delete mismatch at line %d", cursor+1)
-				}
-				cursor++
-			case '+':
-				result = append(result, line.Text)
-			default:
-				return "", fmt.Errorf("unexpected hunk line kind %q", string(line.Kind))
-			}
-		}
-		position = cursor
-	}
-	result = append(result, lines[position:]...)
-	joined := strings.Join(result, "\n")
-	if hasTrailingNewline {
-		joined += "\n"
-	}
-	return joined, nil
-}
