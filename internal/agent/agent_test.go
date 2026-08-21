@@ -106,7 +106,7 @@ func TestCompleteTurnExecutesToolCall(t *testing.T) {
 	}
 }
 
-func TestCompleteTurnTextualToolCallForcesSingleRequiredRetry(t *testing.T) {
+func TestCompleteTurnTextualToolCallExecutesAndContinues(t *testing.T) {
 	var requestCount int
 	dispatcher := &recordingDispatcher{}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -122,24 +122,19 @@ func TestCompleteTurnTextualToolCallForcesSingleRequiredRetry(t *testing.T) {
 			}
 			_, _ = io.WriteString(writer, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"name\\\":\\\"write_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"hello.go\\\",\\\"content\\\":\\\"package main\\\"}}\\n```\"}}]}")
 		case 2:
-			if payload.ToolChoice != "required" {
-				t.Fatalf("request 2 tool_choice = %#v", payload.ToolChoice)
-			}
-			if got := payload.Messages[len(payload.Messages)-2].Role; got != "assistant" {
-				t.Fatalf("expected assistant context before corrective user message, got %q", got)
-			}
-			last := payload.Messages[len(payload.Messages)-1]
-			if last.Role != "user" || !strings.Contains(last.Content.(string), "native OpenAI-compatible `tool_calls`") {
-				t.Fatalf("missing corrective retry message: %+v", last)
-			}
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_2","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"hello.go\",\"content\":\"package main\"}"}}]}}]}`)
-		case 3:
 			if payload.ToolChoice != "auto" {
-				t.Fatalf("request 3 tool_choice = %#v", payload.ToolChoice)
+				t.Fatalf("request 2 tool_choice = %#v", payload.ToolChoice)
 			}
 			last := payload.Messages[len(payload.Messages)-1]
 			if last.Role != "tool" {
 				t.Fatalf("last role = %q", last.Role)
+			}
+			toolOutput, err := contentText(last.Content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if toolOutput != `{"success":true}` {
+				t.Fatalf("unexpected tool output: %s", toolOutput)
 			}
 			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
 		default:
@@ -156,7 +151,7 @@ func TestCompleteTurnTextualToolCallForcesSingleRequiredRetry(t *testing.T) {
 	if answer != "done" {
 		t.Fatalf("answer = %q", answer)
 	}
-	if requestCount != 3 {
+	if requestCount != 2 {
 		t.Fatalf("request count = %d", requestCount)
 	}
 	if len(dispatcher.calls) != 1 {
@@ -170,29 +165,17 @@ func TestCompleteTurnTextualToolCallForcesSingleRequiredRetry(t *testing.T) {
 	}
 }
 
-func TestCompleteTurnTextualToolCallAfterForcedRetryFails(t *testing.T) {
-	var requestCount int
+func TestCompleteTurnMalformedTextualToolCallFails(t *testing.T) {
 	dispatcher := &recordingDispatcher{}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requestCount++
 		var payload chatRequest
 		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
-		switch requestCount {
-		case 1:
-			if payload.ToolChoice != "auto" {
-				t.Fatalf("request 1 tool_choice = %#v", payload.ToolChoice)
-			}
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"name\":\"write_file\",\"arguments\":{\"path\":\"hello.go\",\"content\":\"package main\"}}"}}]}`)
-		case 2:
-			if payload.ToolChoice != "required" {
-				t.Fatalf("request 2 tool_choice = %#v", payload.ToolChoice)
-			}
-			_, _ = io.WriteString(writer, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"name\\\":\\\"write_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"hello.go\\\",\\\"content\\\":\\\"package main\\\"}}\\n```\"}}]}")
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
+		if payload.ToolChoice != "auto" {
+			t.Fatalf("tool_choice = %#v", payload.ToolChoice)
 		}
+		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"name\":\"write_file\",\"arguments\":\"not-json\"}"}}]}`)
 	}))
 	defer server.Close()
 
@@ -309,9 +292,8 @@ func TestUnmetRequiredWrites(t *testing.T) {
 	}
 }
 
-func TestCompleteTurnMalformedTextualToolCallRequiredWriteFails(t *testing.T) {
+func TestCompleteTurnRequiringWritesAcceptsTextualRepairToolCall(t *testing.T) {
 	var requestCount int
-	dispatcher := &recordingDispatcher{}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		requestCount++
 		var payload chatRequest
@@ -323,28 +305,32 @@ func TestCompleteTurnMalformedTextualToolCallRequiredWriteFails(t *testing.T) {
 			if payload.ToolChoice != "auto" {
 				t.Fatalf("request 1 tool_choice = %#v", payload.ToolChoice)
 			}
-			_, _ = io.WriteString(writer, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"name\\\":\\\"write_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"time.txt\\\",\\\"content\\\":\\\"value\\\"}}}\\n```\"}}]}")
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
 		case 2:
 			if payload.ToolChoice != "required" {
 				t.Fatalf("request 2 tool_choice = %#v", payload.ToolChoice)
 			}
 			last := payload.Messages[len(payload.Messages)-1]
-			if last.Role != "user" || !strings.Contains(last.Content.(string), "native OpenAI-compatible `tool_calls`") {
-				t.Fatalf("missing structured retry request: %+v", last)
+			if last.Role != "user" || !strings.Contains(last.Content.(string), "standalone JSON object") {
+				t.Fatalf("missing required-write repair request: %+v", last)
 			}
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+			_, _ = io.WriteString(writer, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"name\\\":\\\"write_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"time.txt\\\",\\\"content\\\":\\\"value\\\"}}\\n```\"}}]}")
 		case 3:
-			if payload.ToolChoice != "required" {
+			if payload.ToolChoice != "auto" {
 				t.Fatalf("request 3 tool_choice = %#v", payload.ToolChoice)
 			}
 			last := payload.Messages[len(payload.Messages)-1]
-			if last.Role != "user" || !strings.Contains(last.Content.(string), "required write was not completed: time.txt") {
-				t.Fatalf("missing required-write repair request: %+v", last)
+			if last.Role != "tool" {
+				t.Fatalf("last role = %q", last.Role)
 			}
-			if !strings.Contains(last.Content.(string), "shell commands") {
-				t.Fatalf("repair prompt missing shell-command restriction: %+v", last)
+			toolOutput, err := contentText(last.Content)
+			if err != nil {
+				t.Fatal(err)
 			}
-			_, _ = io.WriteString(writer, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"name\\\":\\\"write_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"time.txt\\\",\\\"content\\\":\\\"value\\\"}}\\n```\"}}]}")
+			if !strings.Contains(toolOutput, `"path":"time.txt"`) {
+				t.Fatalf("unexpected tool output: %s", toolOutput)
+			}
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done after repair"}}]}`)
 		default:
 			t.Fatalf("unexpected request count %d", requestCount)
 		}
@@ -357,17 +343,24 @@ func TestCompleteTurnMalformedTextualToolCallRequiredWriteFails(t *testing.T) {
 	}
 	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
 	events := make([]ToolEvent, 0)
-	observed := &eventDispatcher{base: dispatcher, workspace: ws, events: &events}
+	dispatcher := &eventDispatcher{
+		base:      &toolRuntime{workspace: ws, policy: approval.Policy{Yolo: true, Interactive: false}},
+		workspace: ws,
+		events:    &events,
+	}
 
-	_, _, err = completeTurnRequiringWrites(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "write time.txt"}}, openAITools(), observed, ws, []string{"time.txt"}, &events)
-	if err == nil {
-		t.Fatal("expected error")
+	_, answer, err := completeTurnRequiringWrites(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "write time.txt"}}, openAITools(), dispatcher, ws, []string{"time.txt"}, &events)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err.Error() != "required write was not completed: time.txt" {
-		t.Fatalf("unexpected error: %v", err)
+	if answer != "done after repair" {
+		t.Fatalf("answer = %q", answer)
 	}
-	if len(dispatcher.calls) != 0 {
-		t.Fatalf("dispatcher call count = %d", len(dispatcher.calls))
+	if got := len(events); got == 0 || events[0].Path != "time.txt" || !events[0].Success {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+	if _, err := ws.StatFile("time.txt"); err != nil {
+		t.Fatalf("expected written file: %v", err)
 	}
 }
 

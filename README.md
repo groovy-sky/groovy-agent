@@ -108,8 +108,10 @@ docker run --rm -it \
 The entrypoint starts `llama-server` and then launches `groovy-agent agent`.
 The llama.cpp API is available on `http://localhost:8080` while the container
 is running. The `--jinja` flag is passed to llama-server to enable Jinja-based
-chat templates, which are required for reliable structured tool calling with
-Qwen2.5 models.
+chat templates, which improve tool prompting for Qwen2.5 models. The agent
+accepts either native OpenAI `tool_calls` or a single standalone JSON tool-call
+envelope from the model, so local llama.cpp runs do not depend on
+`message.tool_calls` support alone.
 
 You can tune inference with the same environment variables documented below
 (`LLAMA_THREADS`, `LLAMA_CTX_SIZE`, `LLAMA_N_GPU_LAYERS`, etc.).
@@ -265,18 +267,30 @@ passed to the model are derived from `tools/list`, and results are fed back as
 MCP content objects. This means the agent can be observed and extended using
 standard MCP tooling.
 
-For Qwen2.5 compatibility, if the model prints a simulated tool call as plain
-text (for example fenced JSON with `name` and `arguments`) instead of returning
-native `message.tool_calls`, the agent performs one bounded retry with
-`tool_choice: "required"` to request a structured call. Textual JSON is never
-executed directly; only native structured tool calls are dispatched through MCP.
+**Inference protocol vs MCP dispatch.** `llama-server` is only the
+OpenAI-compatible inference endpoint. It does not speak MCP. MCP remains the
+local dispatch layer inside `groovy-agent`: the agent derives tool schemas from
+`tools/list`, sends those schemas to `/v1/chat/completions`, and then dispatches
+validated tool requests through the in-process MCP server.
+
+**Selected tool-call mode.** The agent accepts both:
+
+- native OpenAI `message.tool_calls`, and
+- one standalone JSON object in assistant text with exactly `name`,
+  `arguments`, optional `id`, and optional `type: "function"`.
+
+The textual envelope may be bare JSON or fenced as `json`, but it must be the
+entire assistant response. Its `name` must match a listed tool, and its
+`arguments` must decode to a JSON object that the target tool accepts. Prose,
+shell commands, and malformed JSON are not executed.
 
 `--require-write PATH` adds a concrete postcondition for each ordinary user turn.
 The path must be workspace-relative, and the turn succeeds only if `write_file`
 successfully targets that exact normalized path and the file exists as a regular
 file in the workspace after the tool loop. If the requirement is unmet, the
-agent performs at most one bounded repair turn that requests a native
-`write_file` tool call; textual JSON and shell commands are still not executed.
+agent performs at most one bounded repair turn that requests exactly one
+`write_file` tool call in either native OpenAI form or the standalone JSON
+envelope above; shell commands are still not executed.
 
 Interactive slash commands:
 
