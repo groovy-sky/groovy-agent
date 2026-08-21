@@ -1245,16 +1245,30 @@ func buildToolEvent(ws *workspace.Workspace, call toolCall, output string) ToolE
 	if !result.Success || call.Function.Name != "write_file" || ws == nil {
 		return event
 	}
-	input, err := decodeArguments[writeFileInput](call.Function.Arguments)
-	if err != nil {
-		return event
+	if data, ok := result.Data.(map[string]any); ok {
+		if path, ok := data["path"].(string); ok {
+			event.Path = path
+		}
+		switch value := data["bytes"].(type) {
+		case float64:
+			event.Bytes = int64(value)
+		case int64:
+			event.Bytes = value
+		case int:
+			event.Bytes = int64(value)
+		}
 	}
-	normalized, err := ws.NormalizeRelativePath(input.Path)
-	if err != nil {
-		return event
+	if event.Path == "" {
+		input, err := decodeArguments[writeFileInput](call.Function.Arguments)
+		if err != nil {
+			return event
+		}
+		normalized, err := ws.NormalizeRelativePath(input.Path)
+		if err != nil {
+			return event
+		}
+		event.Path = normalized
 	}
-	event.Path = normalized
-	event.Bytes = int64(len(input.Content))
 	return event
 }
 
@@ -1301,7 +1315,11 @@ func unmetRequiredWrites(ws *workspace.Workspace, events []ToolEvent, requiredWr
 }
 
 func buildRequiredWriteRepairPrompt(paths []string) string {
-	return fmt.Sprintf("The required write was not completed: %s. Return a native OpenAI-compatible `tool_calls` response that invokes `write_file` for exactly the required workspace-relative path or paths. Do not return textual JSON, fenced code blocks, prose tool descriptions, shell commands, or shell substitutions. After the required write succeeds, you may return a brief final answer.", strings.Join(paths, ", "))
+	label := "write"
+	if len(paths) > 1 {
+		label = "writes"
+	}
+	return fmt.Sprintf("The required %s was not completed: %s. Return a native OpenAI-compatible `tool_calls` response that invokes `write_file` for exactly the required workspace-relative path or paths. Do not return textual JSON, fenced code blocks, prose tool descriptions, shell commands, or shell substitutions. After the required write succeeds, you may return a brief final answer.", label, strings.Join(paths, ", "))
 }
 
 func requiredWriteError(path string) error {
