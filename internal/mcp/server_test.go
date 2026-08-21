@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/groovy-sky/groovy-agent/internal/approval"
+	"github.com/groovy-sky/groovy-agent/internal/workspace"
 )
 
 func TestServeInitializeAndCall(t *testing.T) {
@@ -76,16 +79,13 @@ func TestServeCallsGrep(t *testing.T) {
 	}
 }
 
-func TestServeWithConfigListsAgentTools(t *testing.T) {
+func TestServeExternalModeListsCoreutils(t *testing.T) {
 	input := strings.Join([]string{
 		`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
 		"",
 	}, "\n")
 	var output bytes.Buffer
-	// Use a non-nil workspace path so ServeWithConfig returns agent tools.
-	// We pass an empty Config{} here to exercise the workspace-less code path
-	// and separately verify that a workspace-populated config works in an
-	// integration test in the agent package.
+	// External MCP mode (no workspace Config) uses Serve, which only exposes coreutils.
 	if err := Serve(context.Background(), strings.NewReader(input), &output); err != nil {
 		t.Fatal(err)
 	}
@@ -96,5 +96,34 @@ func TestServeWithConfigListsAgentTools(t *testing.T) {
 	// Agent-mode tools must NOT appear in external MCP mode.
 	if strings.Contains(output.String(), `"name":"list_files"`) {
 		t.Fatalf("list_files should not appear in external MCP mode: %s", output.String())
+	}
+}
+
+func TestServeWithConfigListsAgentTools(t *testing.T) {
+	tmp := t.TempDir()
+	ws, err := workspace.New(tmp, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := approval.Policy{Yolo: true}
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`,
+		"",
+	}, "\n")
+	var output bytes.Buffer
+	cfg := Config{Workspace: ws, Policy: &policy}
+	if err := ServeWithConfig(context.Background(), strings.NewReader(input), &output, cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"list_files", "read_file", "search_files", "write_file", "apply_patch", "mkdir", "git_status", "git_diff", "run_coreutil"} {
+		if !strings.Contains(output.String(), `"name":"`+name+`"`) {
+			t.Fatalf("expected tool %s in ServeWithConfig output: %s", name, output.String())
+		}
+	}
+	// Individual coreutils should NOT appear; they're routed via run_coreutil.
+	if strings.Contains(output.String(), `"name":"cat"`) {
+		t.Fatalf("cat should not appear as its own tool in agent MCP mode: %s", output.String())
 	}
 }

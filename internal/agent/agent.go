@@ -369,6 +369,34 @@ func Run(ctx context.Context, input io.Reader, output, errOutput io.Writer, opti
 		return answer == "y" || answer == "yes", nil
 	}
 
+	// currentOnEvent is updated each turn so the single MCP server can record
+	// events into the correct per-turn slice without restarting.
+	var currentOnEvent func(string, bool, *bool, string, string)
+
+	// Start the in-process MCP server once before the loop.
+	// Config.Policy is a pointer so plan-mode changes made via /plan take effect
+	// immediately without restarting the server.
+	mcpCfg := mcp.Config{
+		Workspace: ws,
+		Policy:    &policy,
+		Prompt:    promptFn,
+		OnEvent: func(toolName string, success bool, approved *bool, code, reason string) {
+			if currentOnEvent != nil {
+				currentOnEvent(toolName, success, approved, code, reason)
+			}
+		},
+	}
+	mcpCli, stopMCP, mcpErr := startInProcessMCP(ctx, mcpCfg)
+	if mcpErr != nil {
+		return fmt.Errorf("MCP start error: %w", mcpErr)
+	}
+	defer stopMCP()
+	tools, mcpErr := mcpCli.listTools()
+	if mcpErr != nil {
+		return fmt.Errorf("MCP list tools error: %w", mcpErr)
+	}
+	dispatcher := &mcpDispatcher{client: mcpCli}
+
 	fmt.Fprintln(output, "groovy-agent agent mode. Type 'exit' to quit. Use /help for commands.")
 	for {
 		line, readErr := lineReader.ReadLine("", output)
@@ -397,28 +425,11 @@ func Run(ctx context.Context, input io.Reader, output, errOutput io.Writer, opti
 
 		turn := append(append([]message{}, state.messages...), message{Role: "user", Content: line})
 		events := make([]ToolEvent, 0)
-		mcpCfg := mcp.Config{
-			Workspace: ws,
-			Policy:    policy,
-			Prompt:    promptFn,
-			OnEvent: func(toolName string, success bool, approved *bool, code, reason string) {
-				recordEvent(&events, ToolEvent{Tool: toolName, Success: success, Approved: approved, DeniedCode: code, DeniedReason: reason})
-			},
+		currentOnEvent = func(toolName string, success bool, approved *bool, code, reason string) {
+			recordEvent(&events, ToolEvent{Tool: toolName, Success: success, Approved: approved, DeniedCode: code, DeniedReason: reason})
 		}
-		mcpCli, stopMCP, mcpErr := startInProcessMCP(ctx, mcpCfg)
-		if mcpErr != nil {
-			fmt.Fprintf(errOutput, "agent error: %v\n", mcpErr)
-			continue
-		}
-		tools, mcpErr := mcpCli.listTools()
-		if mcpErr != nil {
-			stopMCP()
-			fmt.Fprintf(errOutput, "agent error: %v\n", mcpErr)
-			continue
-		}
-		dispatcher := &mcpDispatcher{client: mcpCli}
 		updated, assistantAnswer, turnErr := completeTurnWithRuntime(ctx, chatClient, turn, tools, dispatcher)
-		stopMCP()
+		currentOnEvent = nil
 		if turnErr != nil {
 			fmt.Fprintf(errOutput, "agent error: %v\n", turnErr)
 			continue
@@ -463,7 +474,7 @@ func RunHeadless(ctx context.Context, prompt string, options Options) (RunResult
 	policy := approval.Policy{PlanMode: options.PlanMode, Yolo: options.Yolo, Interactive: false}
 	mcpCfg := mcp.Config{
 		Workspace: ws,
-		Policy:    policy,
+		Policy:    &policy,
 		OnEvent: func(toolName string, success bool, approved *bool, code, reason string) {
 			recordEvent(&events, ToolEvent{Tool: toolName, Success: success, Approved: approved, DeniedCode: code, DeniedReason: reason})
 		},

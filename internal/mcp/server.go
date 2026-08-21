@@ -28,7 +28,9 @@ const (
 // server mode). When Workspace is set, the full agent toolset is exposed.
 type Config struct {
 	Workspace *workspace.Workspace
-	Policy    approval.Policy
+	// Policy is a pointer so that the caller can change plan/yolo mode between
+	// tool calls without restarting the MCP server.
+	Policy *approval.Policy
 	// Prompt is called with a human-readable preview before mutating files.
 	// May be nil (mutations that need approval are then denied).
 	Prompt func(preview string) (bool, error)
@@ -549,7 +551,11 @@ func callAgentTool(ctx context.Context, name string, rawArgs json.RawMessage, cf
 
 // evaluateMutation checks the policy and optionally prompts the user.
 func evaluateMutation(cfg Config, toolName, preview string) (bool, toolResult) {
-	decision := cfg.Policy.EvaluateMutation(toolName)
+	var policy approval.Policy
+	if cfg.Policy != nil {
+		policy = *cfg.Policy
+	}
+	decision := policy.EvaluateMutation(toolName)
 	if decision.Allowed {
 		if cfg.OnEvent != nil {
 			cfg.OnEvent(toolName, true, nil, "", "")

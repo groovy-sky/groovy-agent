@@ -257,7 +257,7 @@ func TestMCPDispatcherCallsThroughMCP(t *testing.T) {
 	}
 	cfg := mcp.Config{
 		Workspace: ws,
-		Policy:    approval.Policy{Yolo: true},
+		Policy:    &approval.Policy{Yolo: true},
 	}
 	mcpCli, stop, err := startInProcessMCP(context.Background(), cfg)
 	if err != nil {
@@ -306,7 +306,7 @@ func TestMCPPlanModeDeniesMutationViaMCP(t *testing.T) {
 	}
 	cfg := mcp.Config{
 		Workspace: ws,
-		Policy:    approval.Policy{PlanMode: true, Interactive: false},
+		Policy:    &approval.Policy{PlanMode: true, Interactive: false},
 	}
 	mcpCli, stop, err := startInProcessMCP(context.Background(), cfg)
 	if err != nil {
