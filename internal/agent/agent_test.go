@@ -21,6 +21,7 @@ func TestAPIClientCompleteParsesToolCalls(t *testing.T) {
 		if request.URL.Path != "/chat/completions" {
 			t.Fatalf("path = %s", request.URL.Path)
 		}
+
 		if got := request.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer ") {
 			t.Fatalf("authorization = %q", got)
 		}
@@ -34,12 +35,15 @@ func TestAPIClientCompleteParsesToolCalls(t *testing.T) {
 		if len(payload.Messages) != 1 || payload.Messages[0].Role != "user" {
 			t.Fatalf("unexpected messages: %+v", payload.Messages)
 		}
+		if payload.ToolChoice != "auto" {
+			t.Fatalf("tool_choice = %#v", payload.ToolChoice)
+		}
 		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"run_coreutil","arguments":"{\"utility\":\"pwd\"}"}}]}}]}`)
 	}))
 	defer server.Close()
 
 	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
-	message, err := client.Complete(context.Background(), []message{{Role: "user", Content: "where am I"}}, openAITools())
+	message, err := client.Complete(context.Background(), []message{{Role: "user", Content: "where am I"}}, openAITools(), chatCompleteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,8 +65,14 @@ func TestCompleteTurnExecutesToolCall(t *testing.T) {
 		}
 		switch requestCount {
 		case 1:
+			if payload.ToolChoice != "auto" {
+				t.Fatalf("request 1 tool_choice = %#v", payload.ToolChoice)
+			}
 			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"run_coreutil","arguments":"{\"utility\":\"cat\",\"stdin\":\"hello\\n\"}"}}]}}]}`)
 		case 2:
+			if payload.ToolChoice != "auto" {
+				t.Fatalf("request 2 tool_choice = %#v", payload.ToolChoice)
+			}
 			last := payload.Messages[len(payload.Messages)-1]
 			if last.Role != "tool" {
 				t.Fatalf("last role = %q", last.Role)
@@ -91,6 +101,136 @@ func TestCompleteTurnExecutesToolCall(t *testing.T) {
 	}
 	if got := len(messages); got != 5 {
 		t.Fatalf("message count = %d", got)
+	}
+}
+
+func TestCompleteTurnTextualToolCallForcesSingleRequiredRetry(t *testing.T) {
+	var requestCount int
+	dispatcher := &recordingDispatcher{}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestCount++
+		var payload chatRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		switch requestCount {
+		case 1:
+			if payload.ToolChoice != "auto" {
+				t.Fatalf("request 1 tool_choice = %#v", payload.ToolChoice)
+			}
+			_, _ = io.WriteString(writer, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"name\\\":\\\"write_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"hello.go\\\",\\\"content\\\":\\\"package main\\\"}}\\n```\"}}]}")
+		case 2:
+			if payload.ToolChoice != "required" {
+				t.Fatalf("request 2 tool_choice = %#v", payload.ToolChoice)
+			}
+			if got := payload.Messages[len(payload.Messages)-2].Role; got != "assistant" {
+				t.Fatalf("expected assistant context before corrective user message, got %q", got)
+			}
+			last := payload.Messages[len(payload.Messages)-1]
+			if last.Role != "user" || !strings.Contains(last.Content.(string), "native OpenAI-compatible `tool_calls`") {
+				t.Fatalf("missing corrective retry message: %+v", last)
+			}
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_2","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"hello.go\",\"content\":\"package main\"}"}}]}}]}`)
+		case 3:
+			if payload.ToolChoice != "auto" {
+				t.Fatalf("request 3 tool_choice = %#v", payload.ToolChoice)
+			}
+			last := payload.Messages[len(payload.Messages)-1]
+			if last.Role != "tool" {
+				t.Fatalf("last role = %q", last.Role)
+			}
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+		default:
+			t.Fatalf("unexpected request count %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
+	messages, answer, err := completeTurnWithRuntime(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "create file"}}, openAITools(), dispatcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "done" {
+		t.Fatalf("answer = %q", answer)
+	}
+	if requestCount != 3 {
+		t.Fatalf("request count = %d", requestCount)
+	}
+	if len(dispatcher.calls) != 1 {
+		t.Fatalf("dispatcher call count = %d", len(dispatcher.calls))
+	}
+	if dispatcher.calls[0].Function.Name != "write_file" {
+		t.Fatalf("dispatcher tool = %q", dispatcher.calls[0].Function.Name)
+	}
+	if len(messages) == 0 || messages[len(messages)-1].Role != "assistant" {
+		t.Fatalf("expected final assistant response in transcript")
+	}
+}
+
+func TestCompleteTurnTextualToolCallAfterForcedRetryFails(t *testing.T) {
+	var requestCount int
+	dispatcher := &recordingDispatcher{}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestCount++
+		var payload chatRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		switch requestCount {
+		case 1:
+			if payload.ToolChoice != "auto" {
+				t.Fatalf("request 1 tool_choice = %#v", payload.ToolChoice)
+			}
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"name\":\"write_file\",\"arguments\":{\"path\":\"hello.go\",\"content\":\"package main\"}}"}}]}`)
+		case 2:
+			if payload.ToolChoice != "required" {
+				t.Fatalf("request 2 tool_choice = %#v", payload.ToolChoice)
+			}
+			_, _ = io.WriteString(writer, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"name\\\":\\\"write_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"hello.go\\\",\\\"content\\\":\\\"package main\\\"}}\\n```\"}}]}")
+		default:
+			t.Fatalf("unexpected request count %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
+	_, _, err := completeTurnWithRuntime(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "create file"}}, openAITools(), dispatcher)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "textual tool call") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(dispatcher.calls) != 0 {
+		t.Fatalf("dispatcher call count = %d", len(dispatcher.calls))
+	}
+}
+
+func TestCompleteTurnDoesNotTreatProseJSONAsToolCall(t *testing.T) {
+	dispatcher := &recordingDispatcher{}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload chatRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.ToolChoice != "auto" {
+			t.Fatalf("tool_choice = %#v", payload.ToolChoice)
+		}
+		_, _ = io.WriteString(writer, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Here is an example only:\\n```json\\n{\\\"name\\\":\\\"write_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"hello.go\\\",\\\"content\\\":\\\"package main\\\"}}\\n```\\nDo not execute this JSON.\"}}]}")
+	}))
+	defer server.Close()
+
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
+	_, answer, err := completeTurnWithRuntime(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "show an example"}}, openAITools(), dispatcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(answer, "example only") {
+		t.Fatalf("answer = %q", answer)
+	}
+	if len(dispatcher.calls) != 0 {
+		t.Fatalf("dispatcher call count = %d", len(dispatcher.calls))
 	}
 }
 
@@ -370,4 +510,13 @@ func TestPersistResultUsesDefaultDirWhenEmpty(t *testing.T) {
 	if _, err := os.Stat(explicitDefault + "/default-dir-test.json"); err != nil {
 		t.Fatalf("expected file in default dir: %v", err)
 	}
+}
+
+type recordingDispatcher struct {
+	calls []toolCall
+}
+
+func (d *recordingDispatcher) Execute(_ context.Context, call toolCall) string {
+	d.calls = append(d.calls, call)
+	return `{"success":true}`
 }
