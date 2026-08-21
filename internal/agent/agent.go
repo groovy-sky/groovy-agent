@@ -108,6 +108,7 @@ type Options struct {
 	PlanMode      bool
 	Yolo          bool
 	ResumeID      string
+	RequireWrite  []string
 	// OutputDir is the directory where headless run results are persisted as
 	// JSON files. It is created automatically when the agent writes output.
 	// Defaults to DefaultOutputDir ("output") when empty.
@@ -122,6 +123,8 @@ type RunResult struct {
 
 type ToolEvent struct {
 	Tool         string `json:"tool"`
+	Path         string `json:"path,omitempty"`
+	Bytes        int64  `json:"bytes,omitempty"`
 	Approved     *bool  `json:"approved,omitempty"`
 	DeniedCode   string `json:"denied_code,omitempty"`
 	DeniedReason string `json:"denied_reason,omitempty"`
@@ -293,6 +296,18 @@ func (d *mcpDispatcher) Execute(ctx context.Context, call toolCall) string {
 	return output
 }
 
+type eventDispatcher struct {
+	base      toolDispatcher
+	workspace *workspace.Workspace
+	events    *[]ToolEvent
+}
+
+func (dispatcher *eventDispatcher) Execute(ctx context.Context, call toolCall) string {
+	output := dispatcher.base.Execute(ctx, call)
+	recordEvent(dispatcher.events, buildToolEvent(dispatcher.workspace, call, output))
+	return output
+}
+
 // startInProcessMCP starts an MCP server goroutine connected via in-process
 // pipes. It returns the client (already initialized) and a stop function.
 // The server shuts down when stop is called or ctx is cancelled.
@@ -341,6 +356,10 @@ func Run(ctx context.Context, input io.Reader, output, errOutput io.Writer, opti
 	if err != nil {
 		return err
 	}
+	requiredWrites, err := normalizeRequiredWrites(ws, options.RequireWrite)
+	if err != nil {
+		return err
+	}
 	store := session.NewStore(ws.Root)
 	instructionText, instructionSources, err := store.LoadProjectInstructions()
 	if err != nil {
@@ -374,10 +393,6 @@ func Run(ctx context.Context, input io.Reader, output, errOutput io.Writer, opti
 		return answer == "y" || answer == "yes", nil
 	}
 
-	// currentOnEvent is updated each turn so the single MCP server can record
-	// events into the correct per-turn slice without restarting.
-	var currentOnEvent func(string, bool, *bool, string, string)
-
 	// Start the in-process MCP server once before the loop.
 	// Config.Policy is a pointer so plan-mode changes made via /plan take effect
 	// immediately without restarting the server.
@@ -385,11 +400,6 @@ func Run(ctx context.Context, input io.Reader, output, errOutput io.Writer, opti
 		Workspace: ws,
 		Policy:    &policy,
 		Prompt:    promptFn,
-		OnEvent: func(toolName string, success bool, approved *bool, code, reason string) {
-			if currentOnEvent != nil {
-				currentOnEvent(toolName, success, approved, code, reason)
-			}
-		},
 	}
 	mcpCli, stopMCP, mcpErr := startInProcessMCP(ctx, mcpCfg)
 	if mcpErr != nil {
@@ -430,11 +440,8 @@ func Run(ctx context.Context, input io.Reader, output, errOutput io.Writer, opti
 
 		turn := append(append([]message{}, state.messages...), message{Role: "user", Content: line})
 		events := make([]ToolEvent, 0)
-		currentOnEvent = func(toolName string, success bool, approved *bool, code, reason string) {
-			recordEvent(&events, ToolEvent{Tool: toolName, Success: success, Approved: approved, DeniedCode: code, DeniedReason: reason})
-		}
-		updated, assistantAnswer, turnErr := completeTurnWithRuntime(ctx, chatClient, turn, tools, dispatcher)
-		currentOnEvent = nil
+		recordingDispatcher := &eventDispatcher{base: dispatcher, workspace: ws, events: &events}
+		updated, assistantAnswer, turnErr := completeTurnRequiringWrites(ctx, chatClient, turn, tools, recordingDispatcher, ws, requiredWrites, &events)
 		if turnErr != nil {
 			fmt.Fprintf(errOutput, "agent error: %v\n", turnErr)
 			continue
@@ -454,6 +461,10 @@ func RunHeadless(ctx context.Context, prompt string, options Options) (RunResult
 		return RunResult{}, err
 	}
 	ws, err := workspace.New(options.WorkspacePath, workspace.DefaultLimits())
+	if err != nil {
+		return RunResult{}, err
+	}
+	requiredWrites, err := normalizeRequiredWrites(ws, options.RequireWrite)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -480,9 +491,6 @@ func RunHeadless(ctx context.Context, prompt string, options Options) (RunResult
 	mcpCfg := mcp.Config{
 		Workspace: ws,
 		Policy:    &policy,
-		OnEvent: func(toolName string, success bool, approved *bool, code, reason string) {
-			recordEvent(&events, ToolEvent{Tool: toolName, Success: success, Approved: approved, DeniedCode: code, DeniedReason: reason})
-		},
 	}
 	mcpCli, stopMCP, mcpErr := startInProcessMCP(ctx, mcpCfg)
 	if mcpErr != nil {
@@ -493,10 +501,15 @@ func RunHeadless(ctx context.Context, prompt string, options Options) (RunResult
 	if mcpErr != nil {
 		return RunResult{SessionID: sessionID, Events: events}, mcpErr
 	}
-	dispatcher := &mcpDispatcher{client: mcpCli}
-	updated, answer, err := completeTurnWithRuntime(ctx, chatClient, turn, tools, dispatcher)
+	dispatcher := &eventDispatcher{base: &mcpDispatcher{client: mcpCli}, workspace: ws, events: &events}
+	updated, answer, err := completeTurnRequiringWrites(ctx, chatClient, turn, tools, dispatcher, ws, requiredWrites, &events)
 	if err != nil {
-		return RunResult{SessionID: sessionID, Events: events}, err
+		result := RunResult{SessionID: sessionID, Answer: answer, Events: events}
+		if len(updated) > 0 {
+			_ = storeSnapshot(store, sessionID, createdAt, updated)
+			_ = persistResult(options.OutputDir, sessionID, result)
+		}
+		return result, err
 	}
 	for _, event := range events {
 		if event.DeniedCode == "approval_required_non_interactive" || event.DeniedCode == "plan_mode_denied" || event.DeniedCode == "approval_denied" {
@@ -711,7 +724,10 @@ func completeTurn(ctx context.Context, client chatClient, messages []message, to
 }
 
 func completeTurnWithRuntime(ctx context.Context, client chatClient, messages []message, tools []toolDefinition, dispatcher toolDispatcher) ([]message, string, error) {
-	forceNativeToolCall := false
+	return completeTurnWithRuntimeOptions(ctx, client, messages, tools, dispatcher, false)
+}
+
+func completeTurnWithRuntimeOptions(ctx context.Context, client chatClient, messages []message, tools []toolDefinition, dispatcher toolDispatcher, forceNativeToolCall bool) ([]message, string, error) {
 	for i := 0; i < maxToolCallAttempts; i++ {
 		options := chatCompleteOptions{}
 		if len(tools) > 0 {
@@ -767,6 +783,33 @@ func completeTurnWithRuntime(ctx context.Context, client chatClient, messages []
 	return nil, "", fmt.Errorf("tool loop exceeded %d iterations", maxToolCallAttempts)
 }
 
+func completeTurnRequiringWrites(ctx context.Context, client chatClient, messages []message, tools []toolDefinition, dispatcher toolDispatcher, ws *workspace.Workspace, requiredWrites []string, events *[]ToolEvent) ([]message, string, error) {
+	updated, answer, err := completeTurnWithRuntime(ctx, client, messages, tools, dispatcher)
+	if err != nil || len(requiredWrites) == 0 {
+		return updated, answer, err
+	}
+	unmet := unmetRequiredWrites(ws, eventSlice(events), requiredWrites)
+	if len(unmet) == 0 {
+		return updated, answer, nil
+	}
+	repairMessages := append(append([]message{}, updated...), message{
+		Role:    "user",
+		Content: buildRequiredWriteRepairPrompt(unmet),
+	})
+	repaired, repairedAnswer, repairErr := completeTurnWithRuntimeOptions(ctx, client, repairMessages, tools, dispatcher, true)
+	if repairErr == nil {
+		updated = repaired
+		answer = repairedAnswer
+	} else {
+		updated = repairMessages
+	}
+	unmet = unmetRequiredWrites(ws, eventSlice(events), requiredWrites)
+	if len(unmet) == 0 {
+		return updated, answer, nil
+	}
+	return updated, answer, requiredWriteError(unmet[0])
+}
+
 func contentText(content any) (string, error) {
 	switch value := content.(type) {
 	case string:
@@ -802,7 +845,7 @@ func looksLikeTextualToolCall(text string, tools []toolDefinition) bool {
 	}
 	candidate, ok := extractStandaloneJSONObject(text)
 	if !ok {
-		return false
+		return looksLikeMalformedTextualToolCall(text, tools)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(candidate), &payload); err != nil {
@@ -844,6 +887,34 @@ func looksLikeTextualToolCall(text string, tools []toolDefinition) bool {
 	default:
 		return false
 	}
+}
+
+func looksLikeMalformedTextualToolCall(text string, tools []toolDefinition) bool {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, "```") {
+		return false
+	}
+	newline := strings.IndexByte(trimmed, '\n')
+	if newline == -1 {
+		return false
+	}
+	language := strings.TrimSpace(trimmed[3:newline])
+	if language != "" && !strings.EqualFold(language, "json") {
+		return false
+	}
+	fenceEnd := strings.LastIndex(trimmed, "```")
+	if fenceEnd <= newline || strings.TrimSpace(trimmed[fenceEnd+3:]) != "" {
+		return false
+	}
+	candidate := trimmed[newline+1 : fenceEnd]
+	for _, tool := range tools {
+		if strings.Contains(candidate, `"name"`) &&
+			strings.Contains(candidate, tool.Function.Name) &&
+			strings.Contains(candidate, `"arguments"`) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractStandaloneJSONObject(text string) (string, bool) {
@@ -894,10 +965,11 @@ func previewText(text string, limit int) string {
 }
 
 type toolResult struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
-	Code    string `json:"code,omitempty"`
-	Data    any    `json:"data,omitempty"`
+	Success  bool   `json:"success"`
+	Error    string `json:"error,omitempty"`
+	Code     string `json:"code,omitempty"`
+	Approved *bool  `json:"approved,omitempty"`
+	Data     any    `json:"data,omitempty"`
 }
 
 type runCoreutilInput struct {
@@ -1048,12 +1120,18 @@ func executeToolCallWithRuntime(ctx context.Context, runtime *toolRuntime, call 
 		if !allowed {
 			return marshalToolResult(denied)
 		}
+		result.Approved = denied.Approved
 		if err := runtime.workspace.WriteFile(input.Path, input.Content); err != nil {
 			result.Error = err.Error()
 			return marshalToolResult(result)
 		}
+		normalizedPath, err := runtime.workspace.NormalizeRelativePath(input.Path)
+		if err != nil {
+			result.Error = err.Error()
+			return marshalToolResult(result)
+		}
 		result.Success = true
-		result.Data = map[string]string{"path": input.Path}
+		result.Data = map[string]any{"path": normalizedPath, "bytes": len(input.Content)}
 		return marshalToolResult(result)
 	case "apply_patch":
 		input, err := decodeArguments[applyPatchInput](call.Function.Arguments)
@@ -1069,6 +1147,7 @@ func executeToolCallWithRuntime(ctx context.Context, runtime *toolRuntime, call 
 		if !allowed {
 			return marshalToolResult(denied)
 		}
+		result.Approved = denied.Approved
 		applyResult, err := runtime.workspace.ApplyPatch(input.Patch)
 		if err != nil {
 			result.Error = err.Error()
@@ -1087,6 +1166,7 @@ func executeToolCallWithRuntime(ctx context.Context, runtime *toolRuntime, call 
 		if !allowed {
 			return marshalToolResult(denied)
 		}
+		result.Approved = denied.Approved
 		if err := runtime.workspace.Mkdir(input.Path); err != nil {
 			result.Error = err.Error()
 			return marshalToolResult(result)
@@ -1120,9 +1200,9 @@ func evaluateMutation(runtime *toolRuntime, toolName, preview string) (bool, too
 		}
 		recordEvent(runtime.events, ToolEvent{Tool: toolName, Success: approved, Approved: boolPtr(approved)})
 		if !approved {
-			return false, toolResult{Success: false, Error: "mutation denied by user", Code: "approval_denied"}
+			return false, toolResult{Success: false, Error: "mutation denied by user", Code: "approval_denied", Approved: boolPtr(false)}
 		}
-		return true, toolResult{}
+		return true, toolResult{Approved: boolPtr(true)}
 	}
 	result := toolResult{Success: false, Error: decision.DeniedReason, Code: decision.StructuredCode}
 	recordEvent(runtime.events, ToolEvent{Tool: toolName, Success: false, DeniedCode: decision.StructuredCode, DeniedReason: decision.DeniedReason})
@@ -1133,11 +1213,117 @@ func recordEvent(events *[]ToolEvent, event ToolEvent) {
 	if events == nil {
 		return
 	}
+	if event.Tool == "" {
+		return
+	}
 	*events = append(*events, event)
 }
 
 func boolPtr(value bool) *bool {
 	return &value
+}
+
+func eventSlice(events *[]ToolEvent) []ToolEvent {
+	if events == nil {
+		return nil
+	}
+	return *events
+}
+
+func buildToolEvent(ws *workspace.Workspace, call toolCall, output string) ToolEvent {
+	event := ToolEvent{Tool: call.Function.Name}
+	var result toolResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		event.Success = false
+		event.DeniedReason = output
+		return event
+	}
+	event.Success = result.Success
+	event.DeniedCode = result.Code
+	event.DeniedReason = result.Error
+	event.Approved = result.Approved
+	if !result.Success || call.Function.Name != "write_file" || ws == nil {
+		return event
+	}
+	if data, ok := result.Data.(map[string]any); ok {
+		if path, ok := data["path"].(string); ok {
+			event.Path = path
+		}
+		switch value := data["bytes"].(type) {
+		case float64:
+			event.Bytes = int64(value)
+		case int64:
+			event.Bytes = value
+		case int:
+			event.Bytes = int64(value)
+		}
+	}
+	if event.Path == "" {
+		input, err := decodeArguments[writeFileInput](call.Function.Arguments)
+		if err != nil {
+			return event
+		}
+		normalized, err := ws.NormalizeRelativePath(input.Path)
+		if err != nil {
+			return event
+		}
+		event.Path = normalized
+	}
+	return event
+}
+
+func normalizeRequiredWrites(ws *workspace.Workspace, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	normalized := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		value, err := ws.NormalizeRelativePath(path)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	return normalized, nil
+}
+
+func unmetRequiredWrites(ws *workspace.Workspace, events []ToolEvent, requiredWrites []string) []string {
+	if len(requiredWrites) == 0 {
+		return nil
+	}
+	written := make(map[string]struct{}, len(requiredWrites))
+	for _, event := range events {
+		if event.Tool != "write_file" || !event.Success || event.Path == "" {
+			continue
+		}
+		if _, err := ws.StatFile(event.Path); err == nil {
+			written[event.Path] = struct{}{}
+		}
+	}
+	unmet := make([]string, 0)
+	for _, path := range requiredWrites {
+		if _, ok := written[path]; !ok {
+			unmet = append(unmet, path)
+		}
+	}
+	return unmet
+}
+
+func buildRequiredWriteRepairPrompt(paths []string) string {
+	label := "write"
+	if len(paths) > 1 {
+		label = "writes"
+	}
+	return fmt.Sprintf("The required %s was not completed: %s. Return a native OpenAI-compatible `tool_calls` response that invokes `write_file` for exactly the required workspace-relative path or paths. Do not return textual JSON, fenced code blocks, prose tool descriptions, shell commands, or shell substitutions. After the required write succeeds, you may return a brief final answer.", label, strings.Join(paths, ", "))
+}
+
+func requiredWriteError(path string) error {
+	return fmt.Errorf("required write was not completed: %s", path)
 }
 
 func previewWrite(path, content string) string {

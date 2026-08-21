@@ -45,6 +45,11 @@ type Workspace struct {
 	Limits Limits
 }
 
+type FileInfo struct {
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+}
+
 func New(root string, limits Limits) (*Workspace, error) {
 	if strings.TrimSpace(root) == "" {
 		cwd, err := os.Getwd()
@@ -98,6 +103,24 @@ func (workspace *Workspace) ResolvePath(path string) (string, error) {
 
 func (workspace *Workspace) ResolveExistingPath(path string) (string, error) {
 	return workspace.resolve(path, false)
+}
+
+func (workspace *Workspace) NormalizeRelativePath(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", errors.New("path is required")
+	}
+	if filepath.IsAbs(path) {
+		return "", fmt.Errorf("path %q must be workspace-relative", path)
+	}
+	resolved, err := workspace.ResolvePath(path)
+	if err != nil {
+		return "", err
+	}
+	rel := relativeFromRoot(workspace.Root, resolved)
+	if rel == "." {
+		return "", fmt.Errorf("path %q must point to a file inside the workspace", path)
+	}
+	return rel, nil
 }
 
 func (workspace *Workspace) resolve(path string, allowMissing bool) (string, error) {
@@ -338,16 +361,9 @@ type LineText struct {
 }
 
 func (workspace *Workspace) ReadFile(path string, startLine, endLine int) (ReadResult, error) {
-	resolved, err := workspace.ResolveExistingPath(path)
+	info, resolved, err := workspace.statRegularFile(path)
 	if err != nil {
 		return ReadResult{}, err
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return ReadResult{}, fmt.Errorf("stat %q: %w", path, err)
-	}
-	if !info.Mode().IsRegular() {
-		return ReadResult{}, fmt.Errorf("path %q is not a regular file", path)
 	}
 	if info.Size() > workspace.Limits.MaxFileSizeBytes {
 		return ReadResult{}, fmt.Errorf("file %q exceeds max size of %d bytes", path, workspace.Limits.MaxFileSizeBytes)
@@ -384,6 +400,14 @@ func (workspace *Workspace) ReadFile(path string, startLine, endLine int) (ReadR
 		TotalLine: total,
 		Lines:     resultLines,
 	}, nil
+}
+
+func (workspace *Workspace) StatFile(path string) (FileInfo, error) {
+	info, resolved, err := workspace.statRegularFile(path)
+	if err != nil {
+		return FileInfo{}, err
+	}
+	return FileInfo{Path: relativeFromRoot(workspace.Root, resolved), Size: info.Size()}, nil
 }
 
 func splitLines(contents []byte) []string {
@@ -589,6 +613,21 @@ func (workspace *Workspace) WriteFile(path, content string) error {
 	}
 	removeTmp = false
 	return nil
+}
+
+func (workspace *Workspace) statRegularFile(path string) (os.FileInfo, string, error) {
+	resolved, err := workspace.ResolveExistingPath(path)
+	if err != nil {
+		return nil, "", err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return nil, "", fmt.Errorf("stat %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, "", fmt.Errorf("path %q is not a regular file", path)
+	}
+	return info, resolved, nil
 }
 
 func (workspace *Workspace) Mkdir(path string) error {

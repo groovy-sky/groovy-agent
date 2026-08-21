@@ -301,10 +301,11 @@ func mcpError(text string) map[string]any {
 // toolResult mirrors the agent's JSON response format so the model receives
 // consistent output regardless of whether dispatch is direct or via MCP.
 type toolResult struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
-	Code    string `json:"code,omitempty"`
-	Data    any    `json:"data,omitempty"`
+	Success  bool   `json:"success"`
+	Error    string `json:"error,omitempty"`
+	Code     string `json:"code,omitempty"`
+	Approved *bool  `json:"approved,omitempty"`
+	Data     any    `json:"data,omitempty"`
 }
 
 func marshalResult(r toolResult) string {
@@ -489,12 +490,18 @@ func callAgentTool(ctx context.Context, name string, rawArgs json.RawMessage, cf
 		if !allowed {
 			return mcpContent(marshalResult(denied)), nil
 		}
+		result.Approved = denied.Approved
 		if err := cfg.Workspace.WriteFile(input.Path, input.Content); err != nil {
 			result.Error = err.Error()
 			return mcpContent(marshalResult(result)), nil
 		}
+		normalizedPath, err := cfg.Workspace.NormalizeRelativePath(input.Path)
+		if err != nil {
+			result.Error = err.Error()
+			return mcpContent(marshalResult(result)), nil
+		}
 		result.Success = true
-		result.Data = map[string]string{"path": input.Path}
+		result.Data = map[string]any{"path": normalizedPath, "bytes": len(input.Content)}
 		return mcpContent(marshalResult(result)), nil
 
 	case "apply_patch":
@@ -514,6 +521,7 @@ func callAgentTool(ctx context.Context, name string, rawArgs json.RawMessage, cf
 		if !allowed {
 			return mcpContent(marshalResult(denied)), nil
 		}
+		result.Approved = denied.Approved
 		applyResult, err := cfg.Workspace.ApplyPatch(input.Patch)
 		if err != nil {
 			result.Error = err.Error()
@@ -535,6 +543,7 @@ func callAgentTool(ctx context.Context, name string, rawArgs json.RawMessage, cf
 		if !allowed {
 			return mcpContent(marshalResult(denied)), nil
 		}
+		result.Approved = denied.Approved
 		if err := cfg.Workspace.Mkdir(input.Path); err != nil {
 			result.Error = err.Error()
 			return mcpContent(marshalResult(result)), nil
@@ -583,15 +592,19 @@ func evaluateMutation(cfg Config, toolName, preview string) (bool, toolResult) {
 			cfg.OnEvent(toolName, approved, &b, "", "")
 		}
 		if !approved {
-			return false, toolResult{Success: false, Error: "mutation denied by user", Code: "approval_denied"}
+			return false, toolResult{Success: false, Error: "mutation denied by user", Code: "approval_denied", Approved: boolPtr(false)}
 		}
-		return true, toolResult{}
+		return true, toolResult{Approved: boolPtr(true)}
 	}
 	r := toolResult{Success: false, Error: decision.DeniedReason, Code: decision.StructuredCode}
 	if cfg.OnEvent != nil {
 		cfg.OnEvent(toolName, false, nil, decision.StructuredCode, decision.DeniedReason)
 	}
 	return false, r
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func previewWrite(path, content string) string {

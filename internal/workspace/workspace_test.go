@@ -22,6 +22,35 @@ func TestResolvePathRejectsTraversalAndOutsideAbsolute(t *testing.T) {
 	}
 }
 
+func TestNormalizeRelativePathRejectsAbsoluteAndTraversal(t *testing.T) {
+	root := t.TempDir()
+	workspace, err := New(root, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.NormalizeRelativePath("../outside.txt"); err == nil {
+		t.Fatal("expected traversal error")
+	}
+	if _, err := workspace.NormalizeRelativePath(filepath.Join(root, "inside.txt")); err == nil {
+		t.Fatal("expected absolute path error")
+	}
+}
+
+func TestNormalizeRelativePathCleansWorkspaceRelativePath(t *testing.T) {
+	root := t.TempDir()
+	workspace, err := New(root, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := workspace.NormalizeRelativePath("notes/../notes/a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "notes/a.txt" {
+		t.Fatalf("normalized path = %q", got)
+	}
+}
+
 func TestResolvePathRejectsSymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 	outsideDir := t.TempDir()
@@ -85,5 +114,19 @@ func TestReadFileRejectsBinary(t *testing.T) {
 	}
 	if _, err := workspace.ReadFile("bin.dat", 0, 0); err == nil {
 		t.Fatal("expected binary file error")
+	}
+}
+
+func TestStatFileRejectsNonRegularFiles(t *testing.T) {
+	root := t.TempDir()
+	workspace, err := New(root, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.Mkdir("notes"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.StatFile("notes"); err == nil {
+		t.Fatal("expected directory stat error")
 	}
 }

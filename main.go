@@ -50,6 +50,8 @@ func runAgent(ctx context.Context, args []string) int {
 	planMode := flags.Bool("plan", false, "Enable read-only planning mode")
 	yolo := flags.Bool("yolo", false, "Automatically approve mutations")
 	resumeID := flags.String("resume", "", "Resume from session id")
+	var requireWrite multiStringFlag
+	flags.Var(&requireWrite, "require-write", "Require a successful write to this workspace-relative path (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return exitInvalidConfig
 	}
@@ -58,6 +60,7 @@ func runAgent(ctx context.Context, args []string) int {
 		PlanMode:      *planMode,
 		Yolo:          *yolo,
 		ResumeID:      *resumeID,
+		RequireWrite:  append([]string{}, requireWrite...),
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitRuntimeError
@@ -75,6 +78,8 @@ func runHeadless(ctx context.Context, args []string) int {
 	resumeID := flags.String("resume", "", "Resume from session id")
 	outputFormat := flags.String("output", "text", "Output format: text or json")
 	outputDir := flags.String("output-dir", outputDirDefault(), "Directory for persisted result JSON files")
+	var requireWrite multiStringFlag
+	flags.Var(&requireWrite, "require-write", "Require a successful write to this workspace-relative path (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return exitInvalidConfig
 	}
@@ -87,6 +92,7 @@ func runHeadless(ctx context.Context, args []string) int {
 		PlanMode:      *planMode,
 		Yolo:          *yolo,
 		ResumeID:      *resumeID,
+		RequireWrite:  append([]string{}, requireWrite...),
 		OutputDir:     *outputDir,
 	})
 	if err != nil {
@@ -114,6 +120,17 @@ func runHeadless(ctx context.Context, args []string) int {
 		fmt.Println(result.Answer)
 	}
 	return 0
+}
+
+type multiStringFlag []string
+
+func (values *multiStringFlag) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *multiStringFlag) Set(value string) error {
+	*values = append(*values, value)
+	return nil
 }
 
 func isPolicyDenied(err error) bool {
