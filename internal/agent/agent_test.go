@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/groovy-sky/groovy-agent/internal/approval"
+	"github.com/groovy-sky/groovy-agent/internal/mcp"
 	"github.com/groovy-sky/groovy-agent/internal/workspace"
 )
 
@@ -129,7 +130,7 @@ func TestApplyUnifiedPatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	patch := "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+three\n"
-	if _, err := applyUnifiedPatch(ws, patch); err != nil {
+	if _, err := ws.ApplyPatch(patch); err != nil {
 		t.Fatal(err)
 	}
 	read, err := ws.ReadFile("a.txt", 0, 0)
@@ -167,6 +168,7 @@ func TestClientFromEnvReadsOverrides(t *testing.T) {
 
 func TestClientFromEnvUsesLongRequestTimeoutByDefault(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "local-model")
 	t.Setenv("OPENAI_REQUEST_TIMEOUT", "")
 
 	client, err := clientFromEnv()
@@ -180,6 +182,7 @@ func TestClientFromEnvUsesLongRequestTimeoutByDefault(t *testing.T) {
 
 func TestClientFromEnvRejectsInvalidRequestTimeout(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "local-model")
 	t.Setenv("OPENAI_REQUEST_TIMEOUT", "-1s")
 
 	if _, err := clientFromEnv(); err == nil {
@@ -189,6 +192,7 @@ func TestClientFromEnvRejectsInvalidRequestTimeout(t *testing.T) {
 
 func TestClientFromEnvAllowsDisabledRequestTimeout(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "local-model")
 	t.Setenv("OPENAI_REQUEST_TIMEOUT", "0")
 
 	client, err := clientFromEnv()
@@ -204,6 +208,124 @@ func TestClientFromEnvRequiresKey(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	if _, err := clientFromEnv(); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestClientFromEnvRequiresModel(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "")
+	if _, err := clientFromEnv(); err == nil {
+		t.Fatal("expected error for missing OPENAI_MODEL")
+	}
+}
+
+func TestClientFromEnvRejectsRemoteURL(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "local-model")
+	t.Setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+	if _, err := clientFromEnv(); err == nil {
+		t.Fatal("expected error for remote OPENAI_BASE_URL")
+	}
+}
+
+func TestIsLocalURL(t *testing.T) {
+	cases := []struct {
+		url   string
+		local bool
+	}{
+		{"http://127.0.0.1:8080/v1", true},
+		{"http://localhost:8080/v1", true},
+		{"http://[::1]:8080/v1", true},
+		{"https://api.openai.com/v1", false},
+		{"http://example.com/v1", false},
+		{"http://10.0.0.1:8080/v1", false},
+	}
+	for _, c := range cases {
+		got := isLocalURL(c.url)
+		if got != c.local {
+			t.Errorf("isLocalURL(%q) = %v, want %v", c.url, got, c.local)
+		}
+	}
+}
+
+func TestMCPDispatcherCallsThroughMCP(t *testing.T) {
+	// Start an in-process MCP server and verify tool calls traverse it.
+	root := t.TempDir()
+	ws, err := workspace.New(root, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := mcp.Config{
+		Workspace: ws,
+		Policy:    approval.Policy{Yolo: true},
+	}
+	mcpCli, stop, err := startInProcessMCP(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	tools, err := mcpCli.listTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// tools/list must include workspace tools.
+	found := false
+	for _, td := range tools {
+		if td.Function.Name == "list_files" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("list_files not in tools: %v", tools)
+	}
+
+	// tools/call routes through the MCP protocol.
+	dispatcher := &mcpDispatcher{client: mcpCli}
+	call := toolCall{
+		ID:   "test-call-1",
+		Type: "function",
+		Function: toolFunction{
+			Name:      "run_coreutil",
+			Arguments: map[string]any{"utility": "cat", "stdin": "hello from MCP\n"},
+		},
+	}
+	output := dispatcher.Execute(context.Background(), call)
+	if !strings.Contains(output, "hello from MCP") {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}
+
+func TestMCPPlanModeDeniesMutationViaMCP(t *testing.T) {
+	root := t.TempDir()
+	ws, err := workspace.New(root, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := mcp.Config{
+		Workspace: ws,
+		Policy:    approval.Policy{PlanMode: true, Interactive: false},
+	}
+	mcpCli, stop, err := startInProcessMCP(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	dispatcher := &mcpDispatcher{client: mcpCli}
+	call := toolCall{
+		ID:   "test-deny-1",
+		Type: "function",
+		Function: toolFunction{
+			Name:      "write_file",
+			Arguments: map[string]any{"path": "x.txt", "content": "hello"},
+		},
+	}
+	output := dispatcher.Execute(context.Background(), call)
+	if !strings.Contains(output, "plan_mode_denied") {
+		t.Fatalf("expected plan_mode_denied, got: %s", output)
 	}
 }
 

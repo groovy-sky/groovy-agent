@@ -107,10 +107,36 @@ docker run --rm -it \
 
 The entrypoint starts `llama-server` and then launches `groovy-agent agent`.
 The llama.cpp API is available on `http://localhost:8080` while the container
-is running.
+is running. The `--jinja` flag is passed to llama-server to enable Jinja-based
+chat templates, which are required for reliable structured tool calling with
+Qwen2.5 models.
 
 You can tune inference with the same environment variables documented below
 (`LLAMA_THREADS`, `LLAMA_CTX_SIZE`, `LLAMA_N_GPU_LAYERS`, etc.).
+
+**Interactive mode with `/output` as workspace:**
+
+```sh
+docker run --rm -it \
+  -v "$(pwd)/output:/output" \
+  -p 8080:8080 \
+  ghcr.io/groovy-sky/groovy-agent:qwen2_5 \
+  agent --workspace /output
+```
+
+**Headless `run` mode:**
+
+```sh
+docker run --rm \
+  -v "$(pwd)/output:/output" \
+  -p 8080:8080 \
+  ghcr.io/groovy-sky/groovy-agent:qwen2_5 \
+  run -p "list files in the workspace at depth 1" --workspace /output --yolo
+```
+
+The entrypoint checks whether the first argument is `agent` or `run` and
+forwards it directly; any other argument (or no argument) defaults to `agent`
+mode.
 
 ### Run with host-mounted model (recommended)
 
@@ -133,14 +159,35 @@ file to the output directory. Inside the container the default is `/output`
 files automatically:
 
 ```sh
-docker run --rm -it \
+docker run --rm \
   -v "$(pwd)/artifacts/models:/models:ro" \
   -v "$(pwd)/output:/output" \
   -e LLAMA_MODEL_PATH=/models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
   -p 8080:8080 \
   groovy-agent:local \
-  run -p "summarize the workspace" --yolo
+  run -p "list files at depth 1" --workspace /output --yolo
 ```
+
+**`/output` has two roles depending on mode:**
+
+- As **result persistence directory**: result JSON files (session ID, answer,
+  events) are written here after each headless run.
+- As **workspace**: if you pass `--workspace /output`, the agent also reads and
+  writes files there. Use this when you want the agent to operate on files
+  placed in the mounted output directory.
+
+```sh
+# Interactive mode where /output is also the workspace
+docker run --rm -it \
+  -v "$(pwd)/output:/output" \
+  ghcr.io/groovy-sky/groovy-agent:qwen2_5 \
+  agent --workspace /output
+```
+
+Once in agent mode, try prompts like:
+- `list the files in the workspace at depth 1`
+- `read README.md`
+- `search for the word "agent" in .go files`
 
 Each run produces `<output-dir>/<session-id>.json` containing the session ID,
 final answer, and tool events. The directory is created automatically when the
@@ -200,10 +247,23 @@ go run . agent [--workspace PATH] [--plan] [--yolo] [--resume SESSION_ID]
 
 Environment variables:
 
-- `OPENAI_API_KEY` (required unless provided by container entrypoint defaults)
-- `OPENAI_MODEL` (optional, default: `gpt-4o-mini`)
-- `OPENAI_BASE_URL` (optional, default: `https://api.openai.com/v1`)
+- `OPENAI_API_KEY` (required; set to `local-llama` inside the container)
+- `OPENAI_MODEL` (required; set to the llama-server model alias in the container)
+- `OPENAI_BASE_URL` (default: `http://127.0.0.1:8080/v1`; **only loopback addresses are accepted**)
 - `OPENAI_REQUEST_TIMEOUT` (optional Go duration, default: `3h`; `0` disables)
+
+**Inference is local-only.** The agent enforces that `OPENAI_BASE_URL` resolves
+to a loopback address (`127.0.0.1`, `localhost`, or `::1`). Remote endpoints
+such as `https://api.openai.com/v1` are rejected at startup with a clear error.
+This ensures that the binary always talks to the bundled local llama.cpp server
+rather than any external API.
+
+**Tool dispatch via MCP.** All model-requested tool calls are routed through an
+in-process MCP server using serialized JSON-RPC (`initialize`,
+`notifications/initialized`, `tools/list`, `tools/call`). The tool schemas
+passed to the model are derived from `tools/list`, and results are fed back as
+MCP content objects. This means the agent can be observed and extended using
+standard MCP tooling.
 
 Interactive slash commands:
 

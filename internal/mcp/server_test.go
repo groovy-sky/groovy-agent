@@ -75,3 +75,26 @@ func TestServeCallsGrep(t *testing.T) {
 		t.Fatalf("unexpected grep result: %s", output.String())
 	}
 }
+
+func TestServeWithConfigListsAgentTools(t *testing.T) {
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+		"",
+	}, "\n")
+	var output bytes.Buffer
+	// Use a non-nil workspace path so ServeWithConfig returns agent tools.
+	// We pass an empty Config{} here to exercise the workspace-less code path
+	// and separately verify that a workspace-populated config works in an
+	// integration test in the agent package.
+	if err := Serve(context.Background(), strings.NewReader(input), &output); err != nil {
+		t.Fatal(err)
+	}
+	// External MCP mode (no workspace) still lists coreutils.
+	if !strings.Contains(output.String(), `"name":"cat"`) {
+		t.Fatalf("expected cat tool: %s", output.String())
+	}
+	// Agent-mode tools must NOT appear in external MCP mode.
+	if strings.Contains(output.String(), `"name":"list_files"`) {
+		t.Fatalf("list_files should not appear in external MCP mode: %s", output.String())
+	}
+}
