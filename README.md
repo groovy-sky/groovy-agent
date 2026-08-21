@@ -265,6 +265,12 @@ passed to the model are derived from `tools/list`, and results are fed back as
 MCP content objects. This means the agent can be observed and extended using
 standard MCP tooling.
 
+For Qwen2.5 compatibility, if the model prints a simulated tool call as plain
+text (for example fenced JSON with `name` and `arguments`) instead of returning
+native `message.tool_calls`, the agent performs one bounded retry with
+`tool_choice: "required"` to request a structured call. Textual JSON is never
+executed directly; only native structured tool calls are dispatched through MCP.
+
 Interactive slash commands:
 
 - `/help`

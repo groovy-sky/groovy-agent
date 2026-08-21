@@ -65,9 +65,10 @@ type toolSpec struct {
 }
 
 type chatRequest struct {
-	Model    string           `json:"model"`
-	Messages []message        `json:"messages"`
-	Tools    []toolDefinition `json:"tools,omitempty"`
+	Model      string           `json:"model"`
+	Messages   []message        `json:"messages"`
+	Tools      []toolDefinition `json:"tools,omitempty"`
+	ToolChoice any              `json:"tool_choice,omitempty"`
 }
 
 type chatResponse struct {
@@ -80,7 +81,11 @@ type chatResponse struct {
 }
 
 type chatClient interface {
-	Complete(context.Context, []message, []toolDefinition) (message, error)
+	Complete(context.Context, []message, []toolDefinition, chatCompleteOptions) (message, error)
+}
+
+type chatCompleteOptions struct {
+	ToolChoice any
 }
 
 type apiClient struct {
@@ -650,8 +655,12 @@ func isLocalURL(rawURL string) bool {
 	return host == "127.0.0.1" || host == "localhost" || host == "::1"
 }
 
-func (client *apiClient) Complete(ctx context.Context, messages []message, tools []toolDefinition) (message, error) {
-	requestBody, err := json.Marshal(chatRequest{Model: client.model, Messages: messages, Tools: tools})
+func (client *apiClient) Complete(ctx context.Context, messages []message, tools []toolDefinition, options chatCompleteOptions) (message, error) {
+	toolChoice := options.ToolChoice
+	if len(tools) > 0 && toolChoice == nil {
+		toolChoice = "auto"
+	}
+	requestBody, err := json.Marshal(chatRequest{Model: client.model, Messages: messages, Tools: tools, ToolChoice: toolChoice})
 	if err != nil {
 		return message{}, err
 	}
@@ -702,8 +711,16 @@ func completeTurn(ctx context.Context, client chatClient, messages []message, to
 }
 
 func completeTurnWithRuntime(ctx context.Context, client chatClient, messages []message, tools []toolDefinition, dispatcher toolDispatcher) ([]message, string, error) {
+	forceNativeToolCall := false
 	for i := 0; i < maxToolCallAttempts; i++ {
-		assistantMessage, err := client.Complete(ctx, messages, tools)
+		options := chatCompleteOptions{}
+		if len(tools) > 0 {
+			options.ToolChoice = "auto"
+			if forceNativeToolCall {
+				options.ToolChoice = "required"
+			}
+		}
+		assistantMessage, err := client.Complete(ctx, messages, tools, options)
 		if err != nil {
 			return nil, "", err
 		}
@@ -715,9 +732,24 @@ func completeTurnWithRuntime(ctx context.Context, client chatClient, messages []
 			if strings.TrimSpace(text) == "" {
 				return nil, "", errors.New("assistant returned an empty response")
 			}
+			if looksLikeTextualToolCall(text, tools) {
+				if forceNativeToolCall {
+					return nil, "", fmt.Errorf("assistant returned a textual tool call after forced structured retry; expected native tool_calls (preview: %q)", previewText(text, 200))
+				}
+				forceNativeToolCall = true
+				messages = append(messages,
+					message{Role: "assistant", Content: text},
+					message{
+						Role:    "user",
+						Content: "Your previous response printed a simulated tool call as text. Do not print JSON or Markdown tool calls. Retry and return a native OpenAI-compatible `tool_calls` response using one of the provided tools.",
+					},
+				)
+				continue
+			}
 			messages = append(messages, message{Role: "assistant", Content: text})
 			return messages, text, nil
 		}
+		forceNativeToolCall = false
 		messages = append(messages, message{Role: "assistant", Content: assistantMessage.Content, ToolCalls: assistantMessage.ToolCalls})
 		for _, call := range assistantMessage.ToolCalls {
 			if call.ID == "" {
@@ -762,6 +794,103 @@ func contentText(content any) (string, error) {
 	default:
 		return "", fmt.Errorf("unexpected assistant content type %T", content)
 	}
+}
+
+func looksLikeTextualToolCall(text string, tools []toolDefinition) bool {
+	if len(tools) == 0 {
+		return false
+	}
+	candidate, ok := extractStandaloneJSONObject(text)
+	if !ok {
+		return false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(candidate), &payload); err != nil {
+		return false
+	}
+	name, ok := payload["name"].(string)
+	if !ok || strings.TrimSpace(name) == "" {
+		return false
+	}
+	toolNames := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		toolNames[tool.Function.Name] = struct{}{}
+	}
+	if _, ok := toolNames[name]; !ok {
+		return false
+	}
+	if _, ok := payload["arguments"]; !ok {
+		return false
+	}
+	for key := range payload {
+		switch key {
+		case "name", "arguments", "id", "type":
+		default:
+			return false
+		}
+	}
+	if kind, ok := payload["type"]; ok {
+		typeString, ok := kind.(string)
+		if !ok || typeString != "function" {
+			return false
+		}
+	}
+	switch value := payload["arguments"].(type) {
+	case map[string]any:
+		return true
+	case string:
+		var decoded map[string]any
+		return json.Unmarshal([]byte(value), &decoded) == nil
+	default:
+		return false
+	}
+}
+
+func extractStandaloneJSONObject(text string) (string, bool) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return "", false
+	}
+	if strings.HasPrefix(trimmed, "```") {
+		fenceEnd := strings.LastIndex(trimmed, "```")
+		if fenceEnd <= 2 {
+			return "", false
+		}
+		rest := strings.TrimSpace(trimmed[fenceEnd+3:])
+		if rest != "" {
+			return "", false
+		}
+		newline := strings.IndexByte(trimmed, '\n')
+		if newline == -1 {
+			return "", false
+		}
+		language := strings.TrimSpace(trimmed[3:newline])
+		if language != "" && !strings.EqualFold(language, "json") {
+			return "", false
+		}
+		trimmed = strings.TrimSpace(trimmed[newline+1 : fenceEnd])
+	}
+	if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
+		return "", false
+	}
+	var payload map[string]any
+	decoder := json.NewDecoder(strings.NewReader(trimmed))
+	if err := decoder.Decode(&payload); err != nil {
+		return "", false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return "", false
+	}
+	return trimmed, true
+}
+
+func previewText(text string, limit int) string {
+	normalized := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if limit <= 0 || len(normalized) <= limit {
+		return normalized
+	}
+	return normalized[:limit] + "..."
 }
 
 type toolResult struct {
@@ -1220,4 +1349,3 @@ func storeSnapshot(store *session.Store, sessionID string, createdAt time.Time, 
 	}
 	return store.SaveSnapshot(sessionID, stored, createdAt, time.Now())
 }
-
