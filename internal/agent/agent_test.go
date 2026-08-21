@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/groovy-sky/groovy-agent/internal/approval"
 	"github.com/groovy-sky/groovy-agent/internal/mcp"
+	"github.com/groovy-sky/groovy-agent/internal/session"
 	"github.com/groovy-sky/groovy-agent/internal/workspace"
 )
 
@@ -200,6 +202,168 @@ func TestCompleteTurnTextualToolCallAfterForcedRetryFails(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	if !strings.Contains(err.Error(), "textual tool call") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(dispatcher.calls) != 0 {
+		t.Fatalf("dispatcher call count = %d", len(dispatcher.calls))
+	}
+}
+
+func TestCompleteTurnRequiringWritesSatisfiedByNativeWrite(t *testing.T) {
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestCount++
+		var payload chatRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		switch requestCount {
+		case 1:
+			if payload.ToolChoice != "auto" {
+				t.Fatalf("request 1 tool_choice = %#v", payload.ToolChoice)
+			}
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"time.txt\",\"content\":\"value\"}"}}]}}]}`)
+		case 2:
+			last := payload.Messages[len(payload.Messages)-1]
+			if last.Role != "tool" {
+				t.Fatalf("last role = %q", last.Role)
+			}
+			toolOutput, err := contentText(last.Content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(toolOutput, `"path":"time.txt"`) {
+				t.Fatalf("unexpected tool output: %s", toolOutput)
+			}
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+		default:
+			t.Fatalf("unexpected request count %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	ws, err := workspace.New(t.TempDir(), workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
+	events := make([]ToolEvent, 0)
+	dispatcher := &eventDispatcher{
+		base:      &toolRuntime{workspace: ws, policy: approval.Policy{Yolo: true, Interactive: false}},
+		workspace: ws,
+		events:    &events,
+	}
+
+	_, answer, err := completeTurnRequiringWrites(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "write time.txt"}}, openAITools(), dispatcher, ws, []string{"time.txt"}, &events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "done" {
+		t.Fatalf("answer = %q", answer)
+	}
+	if got := len(events); got == 0 || events[0].Path != "time.txt" || !events[0].Success {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+	if _, err := ws.StatFile("time.txt"); err != nil {
+		t.Fatalf("expected written file: %v", err)
+	}
+}
+
+func TestUnmetRequiredWrites(t *testing.T) {
+	ws, err := workspace.New(t.TempDir(), workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.WriteFile("written.txt", "ok"); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name   string
+		events []ToolEvent
+		want   []string
+	}{
+		{
+			name:   "write to different path fails",
+			events: []ToolEvent{{Tool: "write_file", Success: true, Path: "other.txt"}},
+			want:   []string{"written.txt"},
+		},
+		{
+			name:   "no write fails",
+			events: nil,
+			want:   []string{"written.txt"},
+		},
+		{
+			name:   "matching write succeeds",
+			events: []ToolEvent{{Tool: "write_file", Success: true, Path: "written.txt"}},
+			want:   nil,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			unmet := unmetRequiredWrites(ws, testCase.events, []string{"written.txt"})
+			if strings.Join(unmet, ",") != strings.Join(testCase.want, ",") {
+				t.Fatalf("unmet = %v, want %v", unmet, testCase.want)
+			}
+		})
+	}
+}
+
+func TestCompleteTurnMalformedTextualToolCallRequiredWriteFails(t *testing.T) {
+	var requestCount int
+	dispatcher := &recordingDispatcher{}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestCount++
+		var payload chatRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		switch requestCount {
+		case 1:
+			if payload.ToolChoice != "auto" {
+				t.Fatalf("request 1 tool_choice = %#v", payload.ToolChoice)
+			}
+			_, _ = io.WriteString(writer, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"name\\\":\\\"write_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"time.txt\\\",\\\"content\\\":\\\"value\\\"}}}\\n```\"}}]}")
+		case 2:
+			if payload.ToolChoice != "required" {
+				t.Fatalf("request 2 tool_choice = %#v", payload.ToolChoice)
+			}
+			last := payload.Messages[len(payload.Messages)-1]
+			if last.Role != "user" || !strings.Contains(last.Content.(string), "native OpenAI-compatible `tool_calls`") {
+				t.Fatalf("missing structured retry request: %+v", last)
+			}
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+		case 3:
+			if payload.ToolChoice != "required" {
+				t.Fatalf("request 3 tool_choice = %#v", payload.ToolChoice)
+			}
+			last := payload.Messages[len(payload.Messages)-1]
+			if last.Role != "user" || !strings.Contains(last.Content.(string), "required write was not completed: time.txt") {
+				t.Fatalf("missing required-write repair request: %+v", last)
+			}
+			if !strings.Contains(last.Content.(string), "shell commands") {
+				t.Fatalf("repair prompt missing shell-command restriction: %+v", last)
+			}
+			_, _ = io.WriteString(writer, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"name\\\":\\\"write_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"time.txt\\\",\\\"content\\\":\\\"value\\\"}}\\n```\"}}]}")
+		default:
+			t.Fatalf("unexpected request count %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	ws, err := workspace.New(t.TempDir(), workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
+	events := make([]ToolEvent, 0)
+	observed := &eventDispatcher{base: dispatcher, workspace: ws, events: &events}
+
+	_, _, err = completeTurnRequiringWrites(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "write time.txt"}}, openAITools(), observed, ws, []string{"time.txt"}, &events)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if err.Error() != "required write was not completed: time.txt" {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(dispatcher.calls) != 0 {
@@ -509,6 +673,102 @@ func TestPersistResultUsesDefaultDirWhenEmpty(t *testing.T) {
 	}
 	if _, err := os.Stat(explicitDefault + "/default-dir-test.json"); err != nil {
 		t.Fatalf("expected file in default dir: %v", err)
+	}
+}
+
+func TestRunHeadlessPreservesPersistenceOnRequiredWriteFailure(t *testing.T) {
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestCount++
+		var payload chatRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		switch requestCount {
+		case 1:
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"other.txt\",\"content\":\"wrong\"}"}}]}}]}`)
+		case 2:
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+		case 3:
+			if payload.ToolChoice != "required" {
+				t.Fatalf("repair tool_choice = %#v", payload.ToolChoice)
+			}
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"still done"}}]}`)
+		default:
+			t.Fatalf("unexpected request count %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "test-model")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	workspaceRoot := t.TempDir()
+	outputDir := filepath.Join(t.TempDir(), "results")
+	result, err := RunHeadless(context.Background(), "write time.txt", Options{
+		WorkspacePath: workspaceRoot,
+		Yolo:          true,
+		RequireWrite:  []string{"time.txt"},
+		OutputDir:     outputDir,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if err.Error() != "required write was not completed: time.txt" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Answer != "still done" {
+		t.Fatalf("answer = %q", result.Answer)
+	}
+	if len(result.Events) == 0 || result.Events[0].Path != "other.txt" || !result.Events[0].Success {
+		t.Fatalf("unexpected events: %+v", result.Events)
+	}
+	resultPath := filepath.Join(outputDir, result.SessionID+".json")
+	if _, statErr := os.Stat(resultPath); statErr != nil {
+		t.Fatalf("expected persisted result: %v", statErr)
+	}
+	data, readErr := os.ReadFile(resultPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var persisted RunResult
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Answer != result.Answer || len(persisted.Events) != len(result.Events) {
+		t.Fatalf("unexpected persisted result: %+v", persisted)
+	}
+	sessionPath := filepath.Join(workspaceRoot, session.SessionsDir, result.SessionID+".jsonl")
+	if _, statErr := os.Stat(sessionPath); statErr != nil {
+		t.Fatalf("expected persisted session: %v", statErr)
+	}
+}
+
+func TestRunHeadlessWithoutRequireWritePreservesExistingBehavior(t *testing.T) {
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestCount++
+		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "test-model")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	result, err := RunHeadless(context.Background(), "say hello", Options{
+		WorkspacePath: t.TempDir(),
+		OutputDir:     filepath.Join(t.TempDir(), "results"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Answer != "done" {
+		t.Fatalf("answer = %q", result.Answer)
+	}
+	if requestCount != 1 {
+		t.Fatalf("request count = %d", requestCount)
 	}
 }
 

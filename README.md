@@ -121,7 +121,7 @@ docker run --rm -it \
   -v "$(pwd)/output:/output" \
   -p 8080:8080 \
   ghcr.io/groovy-sky/groovy-agent:qwen2_5 \
-  agent --workspace /output
+  agent --workspace /output --require-write time.txt
 ```
 
 **Headless `run` mode:**
@@ -131,7 +131,7 @@ docker run --rm \
   -v "$(pwd)/output:/output" \
   -p 8080:8080 \
   ghcr.io/groovy-sky/groovy-agent:qwen2_5 \
-  run -p "list files in the workspace at depth 1" --workspace /output --yolo
+  run -p "store the current date in time.txt" --workspace /output --yolo --require-write time.txt
 ```
 
 The entrypoint checks whether the first argument is `agent` or `run` and
@@ -165,7 +165,7 @@ docker run --rm \
   -e LLAMA_MODEL_PATH=/models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
   -p 8080:8080 \
   groovy-agent:local \
-  run -p "list files at depth 1" --workspace /output --yolo
+  run -p "store the current date in time.txt" --workspace /output --yolo --require-write time.txt
 ```
 
 **`/output` has two roles depending on mode:**
@@ -181,7 +181,7 @@ docker run --rm \
 docker run --rm -it \
   -v "$(pwd)/output:/output" \
   ghcr.io/groovy-sky/groovy-agent:qwen2_5 \
-  agent --workspace /output
+  agent --workspace /output --yolo --require-write time.txt
 ```
 
 Once in agent mode, try prompts like:
@@ -242,7 +242,7 @@ standard input and output.
 ## Agent mode (interactive REPL)
 
 ```sh
-go run . agent [--workspace PATH] [--plan] [--yolo] [--resume SESSION_ID]
+go run . agent [--workspace PATH] [--plan] [--yolo] [--resume SESSION_ID] [--require-write PATH ...]
 ```
 
 Environment variables:
@@ -271,6 +271,13 @@ native `message.tool_calls`, the agent performs one bounded retry with
 `tool_choice: "required"` to request a structured call. Textual JSON is never
 executed directly; only native structured tool calls are dispatched through MCP.
 
+`--require-write PATH` adds a concrete postcondition for each ordinary user turn.
+The path must be workspace-relative, and the turn succeeds only if `write_file`
+successfully targets that exact normalized path and the file exists as a regular
+file in the workspace after the tool loop. If the requirement is unmet, the
+agent performs at most one bounded repair turn that requests a native
+`write_file` tool call; textual JSON and shell commands are still not executed.
+
 Interactive slash commands:
 
 - `/help`
@@ -283,7 +290,9 @@ Interactive slash commands:
 
 Mutation tools (`write_file`, `apply_patch`, `mkdir`) require approval by
 default. Use `--yolo` to auto-approve. Use `--plan` to deny mutations while
-returning structured planning feedback to the model.
+returning structured planning feedback to the model. `--require-write` verifies
+that a specific file write happened; it does not bypass approval, so interactive
+approval or `--yolo` is still required for the write itself.
 
 Sessions are persisted as JSONL snapshots under:
 
@@ -301,11 +310,17 @@ policy.
 ## Headless mode
 
 ```sh
-go run . run -p "summarize current diff" [--workspace PATH] [--output text|json] [--plan] [--yolo] [--resume SESSION_ID]
+go run . run -p "summarize current diff" [--workspace PATH] [--output text|json] [--plan] [--yolo] [--resume SESSION_ID] [--require-write PATH ...]
 ```
 
 In non-interactive mode without `--yolo`, mutating tools are denied instead of
 prompting.
+
+In headless mode, each `--require-write PATH` flag adds a verified postcondition
+for the run. A run exits with failure unless `write_file` successfully writes
+that exact normalized workspace-relative path during the run and the file exists
+afterward. When a required write is missed, the agent performs at most one
+bounded repair turn before returning `required write was not completed: PATH`.
 
 ## Command-line use
 
