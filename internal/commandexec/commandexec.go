@@ -15,6 +15,8 @@ import (
 	"github.com/groovy-sky/groovy-agent/internal/workspace"
 )
 
+var errExecutionTimeout = errors.New("execution timeout exceeded")
+
 // Options controls isolated command execution inside a workspace.
 type Options struct {
 	WorkspaceRoot string
@@ -65,7 +67,7 @@ func Execute(ctx context.Context, options Options) (Result, error) {
 	runCtx := ctx
 	cancel := func() {}
 	if options.Timeout > 0 {
-		runCtx, cancel = context.WithTimeout(ctx, options.Timeout)
+		runCtx, cancel = context.WithTimeoutCause(ctx, options.Timeout, errExecutionTimeout)
 	}
 	defer cancel()
 
@@ -111,9 +113,13 @@ func Execute(ctx context.Context, options Options) (Result, error) {
 	result.Stdout = stdout.String()
 	result.Stderr = stderr.String()
 
-	if err := runCtx.Err(); err != nil {
-		result.TimedOut = errors.Is(err, context.DeadlineExceeded)
-		result.Canceled = errors.Is(err, context.Canceled)
+	if runErr := runCtx.Err(); runErr != nil {
+		cause := context.Cause(runCtx)
+		if errors.Is(cause, errExecutionTimeout) {
+			result.TimedOut = true
+		} else {
+			result.Canceled = true
+		}
 	}
 
 	if cmd.ProcessState != nil {
