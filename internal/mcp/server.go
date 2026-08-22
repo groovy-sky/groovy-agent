@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/groovy-sky/groovy-agent/coreutils"
 	"github.com/groovy-sky/groovy-agent/internal/approval"
+	"github.com/groovy-sky/groovy-agent/internal/commandexec"
 	"github.com/groovy-sky/groovy-agent/internal/gittools"
 	"github.com/groovy-sky/groovy-agent/internal/workspace"
 )
@@ -277,6 +279,24 @@ func agentTools() map[string]any {
 				"required":             []string{"path"},
 				"properties": map[string]any{
 					"path": map[string]any{"type": "string"},
+				},
+			},
+		},
+		{
+			Name:        "exec_command",
+			Description: "Execute a command in the workspace using explicit executable and arguments (no shell interpolation).",
+			InputSchema: map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"required":             []string{"executable"},
+				"properties": map[string]any{
+					"working_dir":     map[string]any{"type": "string", "description": "Workspace-relative working directory (default workspace root)."},
+					"executable":      map[string]any{"type": "string"},
+					"args":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"stdin":           map[string]any{"type": "string"},
+					"timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": 3600},
+					"inherit_env":     map[string]any{"type": "boolean"},
+					"env":             map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
 				},
 			},
 		},
@@ -552,6 +572,68 @@ func callAgentTool(ctx context.Context, name string, rawArgs json.RawMessage, cf
 		result.Data = map[string]string{"path": input.Path}
 		return mcpContent(marshalResult(result)), nil
 
+	case "exec_command":
+		var input struct {
+			WorkingDir     string            `json:"working_dir"`
+			Executable     string            `json:"executable"`
+			Args           []string          `json:"args"`
+			Stdin          string            `json:"stdin"`
+			TimeoutSeconds int               `json:"timeout_seconds"`
+			InheritEnv     *bool             `json:"inherit_env"`
+			Env            map[string]string `json:"env"`
+		}
+		if err := decodeArgs(rawArgs, &input); err != nil {
+			result.Error = "malformed tool arguments: " + err.Error()
+			return mcpContent(marshalResult(result)), nil
+		}
+		if strings.TrimSpace(input.Executable) == "" {
+			result.Error = "executable is required"
+			return mcpContent(marshalResult(result)), nil
+		}
+		timeout := 30 * time.Second
+		if input.TimeoutSeconds > 0 {
+			timeout = time.Duration(input.TimeoutSeconds) * time.Second
+		}
+		preview := previewExecCommand(input.WorkingDir, input.Executable, input.Args, timeout)
+		allowed, denied := evaluateMutation(cfg, "exec_command", preview)
+		if !allowed {
+			return mcpContent(marshalResult(denied)), nil
+		}
+		result.Approved = denied.Approved
+		execResult, err := commandexec.Execute(ctx, commandexec.Options{
+			WorkspaceRoot: cfg.Workspace.Root,
+			WorkingDir:    input.WorkingDir,
+			Executable:    input.Executable,
+			Args:          input.Args,
+			Stdin:         input.Stdin,
+			Timeout:       timeout,
+			Env:           input.Env,
+			InheritEnv:    input.InheritEnv == nil || *input.InheritEnv,
+		})
+		if err != nil {
+			result.Error = err.Error()
+			result.Data = execResult
+			return mcpContent(marshalResult(result)), nil
+		}
+		if execResult.TimedOut {
+			result.Error = fmt.Sprintf("command timed out after %s", timeout)
+			result.Data = execResult
+			return mcpContent(marshalResult(result)), nil
+		}
+		if execResult.Canceled {
+			result.Error = "command canceled"
+			result.Data = execResult
+			return mcpContent(marshalResult(result)), nil
+		}
+		if execResult.ExitCode != 0 {
+			result.Error = fmt.Sprintf("command exited with status %d", execResult.ExitCode)
+			result.Data = execResult
+			return mcpContent(marshalResult(result)), nil
+		}
+		result.Success = true
+		result.Data = execResult
+		return mcpContent(marshalResult(result)), nil
+
 	default:
 		result.Error = fmt.Sprintf("unsupported tool %q", name)
 		return mcpContent(marshalResult(result)), nil
@@ -620,6 +702,17 @@ func previewPatch(patch string, max int) string {
 		return patch
 	}
 	return patch[:max] + "\n…"
+}
+
+func previewExecCommand(workingDir, executable string, args []string, timeout time.Duration) string {
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, executable)
+	parts = append(parts, args...)
+	location := workingDir
+	if strings.TrimSpace(location) == "" {
+		location = "."
+	}
+	return fmt.Sprintf("exec_command cwd=%s timeout=%s\n%s", location, timeout, strings.Join(parts, " "))
 }
 
 func decodeArgs(raw json.RawMessage, dst any) error {
