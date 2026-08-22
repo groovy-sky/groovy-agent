@@ -42,6 +42,7 @@ Inside the container:
 - `OPENAI_MODEL` defaults to `Qwen2.5-Coder-7B-Instruct-Q4_K_M`
 - `OPENAI_API_KEY` defaults to `local-llama` (override if needed)
 - `OPENAI_REQUEST_TIMEOUT` defaults to `3h`
+- `OPENAI_MAX_TOKENS` (optional; positive integer; sets the per-request generation token budget sent to the model)
 
 The agent exposes a safe coding toolset (workspace-confined file read/write,
 bounded search/listing, fixed `git status`/`git diff` helpers, `run_coreutil`,
@@ -210,6 +211,7 @@ Agent/OpenAI-compatible settings (all optional in this image):
 - `OPENAI_MODEL`
 - `OPENAI_API_KEY`
 - `OPENAI_REQUEST_TIMEOUT` (Go duration, default `3h`; `0` disables the timeout)
+- `OPENAI_MAX_TOKENS` (optional positive integer; caps the generation token budget per request; omitted when unset so the server default applies)
 - `AGENT_OUTPUT_DIR` (default `/output` in the container, `output` on bare metal)
 
 llama-server/container settings:
@@ -253,6 +255,7 @@ Environment variables:
 - `OPENAI_MODEL` (required; set to the llama-server model alias in the container)
 - `OPENAI_BASE_URL` (default: `http://127.0.0.1:8080/v1`; **only loopback addresses are accepted**)
 - `OPENAI_REQUEST_TIMEOUT` (optional Go duration, default: `3h`; `0` disables)
+- `OPENAI_MAX_TOKENS` (optional positive integer; caps the per-request generation token budget; omit to use the server default)
 
 **Inference is local-only.** The agent enforces that `OPENAI_BASE_URL` resolves
 to a loopback address (`127.0.0.1`, `localhost`, or `::1`). Remote endpoints

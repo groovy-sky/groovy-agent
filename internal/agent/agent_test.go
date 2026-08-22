@@ -798,3 +798,134 @@ func (d *recordingDispatcher) Execute(_ context.Context, call toolCall) string {
 	d.calls = append(d.calls, call)
 	return `{"success":true}`
 }
+
+func TestAPIClientCompleteFinishReasonLengthReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"partial..."},"finish_reason":"length"}]}`)
+	}))
+	defer server.Close()
+
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
+	_, err := client.Complete(context.Background(), []message{{Role: "user", Content: "hello"}}, nil, chatCompleteOptions{})
+	if err == nil {
+		t.Fatal("expected error for finish_reason=length, got nil")
+	}
+	if !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("error message should mention truncation, got: %v", err)
+	}
+}
+
+func TestAPIClientCompleteFinishReasonOmittedSucceeds(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		// finish_reason omitted (empty string after JSON decode)
+		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+	}))
+	defer server.Close()
+
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
+	msg, err := client.Complete(context.Background(), []message{{Role: "user", Content: "hello"}}, nil, chatCompleteOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text, _ := contentText(msg.Content)
+	if text != "done" {
+		t.Fatalf("content = %q", text)
+	}
+}
+
+func TestAPIClientCompleteFinishReasonStopSucceeds(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"all good"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
+	msg, err := client.Complete(context.Background(), []message{{Role: "user", Content: "hello"}}, nil, chatCompleteOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text, _ := contentText(msg.Content)
+	if text != "all good" {
+		t.Fatalf("content = %q", text)
+	}
+}
+
+func TestAPIClientCompleteMaxTokensSentInRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload chatRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.MaxTokens == nil {
+			t.Fatal("expected max_tokens to be set in request, got nil")
+		}
+		if *payload.MaxTokens != 4096 {
+			t.Fatalf("max_tokens = %d, want 4096", *payload.MaxTokens)
+		}
+		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	n := 4096
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL, maxTokens: &n}
+	_, err := client.Complete(context.Background(), []message{{Role: "user", Content: "hello"}}, nil, chatCompleteOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAPIClientCompleteMaxTokensOmittedWhenUnset(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var raw map[string]json.RawMessage
+		if err := json.NewDecoder(request.Body).Decode(&raw); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := raw["max_tokens"]; ok {
+			t.Fatal("max_tokens should be omitted from request when unset")
+		}
+		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
+	_, err := client.Complete(context.Background(), []message{{Role: "user", Content: "hello"}}, nil, chatCompleteOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestClientFromEnvMaxTokensValid(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "test-model")
+	t.Setenv("OPENAI_MAX_TOKENS", "8192")
+	client, err := clientFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.maxTokens == nil || *client.maxTokens != 8192 {
+		t.Fatalf("maxTokens = %v, want 8192", client.maxTokens)
+	}
+}
+
+func TestClientFromEnvMaxTokensInvalid(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "test-model")
+	t.Setenv("OPENAI_MAX_TOKENS", "not-a-number")
+	_, err := clientFromEnv()
+	if err == nil {
+		t.Fatal("expected error for invalid OPENAI_MAX_TOKENS")
+	}
+	if !strings.Contains(err.Error(), "OPENAI_MAX_TOKENS") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestClientFromEnvMaxTokensZeroInvalid(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "test-model")
+	t.Setenv("OPENAI_MAX_TOKENS", "0")
+	_, err := clientFromEnv()
+	if err == nil {
+		t.Fatal("expected error for OPENAI_MAX_TOKENS=0")
+	}
+}
