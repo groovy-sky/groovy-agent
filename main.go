@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/groovy-sky/groovy-agent/coreutils"
 	"github.com/groovy-sky/groovy-agent/internal/agent"
+	"github.com/groovy-sky/groovy-agent/internal/commandexec"
 	"github.com/groovy-sky/groovy-agent/internal/mcp"
 )
 
@@ -34,6 +36,9 @@ func main() {
 		os.Exit(status)
 	case "run":
 		status := runHeadless(context.Background(), os.Args[2:])
+		os.Exit(status)
+	case "exec":
+		status := runExec(context.Background(), os.Args[2:])
 		os.Exit(status)
 	default:
 		if err := coreutils.Run(context.Background(), os.Args[1], os.Args[2:], os.Stdin, os.Stdout, os.Stderr); err != nil {
@@ -149,4 +154,69 @@ func outputDirDefault() string {
 		return v
 	}
 	return agent.DefaultOutputDir
+}
+
+func runExec(ctx context.Context, args []string) int {
+	flags := flag.NewFlagSet("exec", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	workspacePath := flags.String("workspace", "", "Workspace root for command execution")
+	workingDir := flags.String("workdir", "", "Workspace-relative working directory")
+	timeout := flags.Duration("timeout", 30*time.Second, "Execution timeout (0 disables)")
+	noInheritEnv := flags.Bool("no-inherit-env", false, "Do not inherit parent environment")
+	var envPairs multiStringFlag
+	flags.Var(&envPairs, "env", "Environment variable in KEY=VALUE form (repeatable)")
+	if err := flags.Parse(args); err != nil {
+		return exitInvalidConfig
+	}
+	remaining := flags.Args()
+	if len(remaining) == 0 {
+		fmt.Fprintln(os.Stderr, "missing executable argument")
+		return exitInvalidConfig
+	}
+	env, err := parseEnvPairs(envPairs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return exitInvalidConfig
+	}
+	result, err := commandexec.Execute(ctx, commandexec.Options{
+		WorkspaceRoot: *workspacePath,
+		WorkingDir:    *workingDir,
+		Executable:    remaining[0],
+		Args:          remaining[1:],
+		Timeout:       *timeout,
+		Env:           env,
+		InheritEnv:    !*noInheritEnv,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return exitRuntimeError
+	}
+	payload, err := json.Marshal(result)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return exitRuntimeError
+	}
+	fmt.Println(string(payload))
+	if result.TimedOut {
+		return 124
+	}
+	if result.Canceled {
+		return 130
+	}
+	if result.ExitCode > 0 {
+		return result.ExitCode
+	}
+	return 0
+}
+
+func parseEnvPairs(values []string) (map[string]string, error) {
+	env := map[string]string{}
+	for _, value := range values {
+		name, body, ok := strings.Cut(value, "=")
+		if !ok || strings.TrimSpace(name) == "" {
+			return nil, fmt.Errorf("invalid --env value %q, expected KEY=VALUE", value)
+		}
+		env[name] = body
+	}
+	return env, nil
 }

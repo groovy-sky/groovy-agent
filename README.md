@@ -44,9 +44,9 @@ Inside the container:
 - `OPENAI_REQUEST_TIMEOUT` defaults to `3h`
 
 The agent exposes a safe coding toolset (workspace-confined file read/write,
-bounded search/listing, and fixed `git status`/`git diff` helpers) plus
-`run_coreutil`. It does **not** expose shell execution or arbitrary command
-execution.
+bounded search/listing, fixed `git status`/`git diff` helpers, `run_coreutil`,
+and `exec_command`). `exec_command` runs an explicit executable + argument list
+inside the workspace (no shell interpolation).
 
 ### Requirements
 
@@ -351,11 +351,13 @@ Behavior summary:
 - `groovy-agent` (no args) or `groovy-agent mcp`: MCP server mode
 - `groovy-agent agent [flags]`: interactive AI agent mode
 - `groovy-agent run -p \"...\" [flags]`: headless agent mode
+- `groovy-agent exec [--workspace PATH] [--workdir DIR] [--timeout 30s] [--env KEY=VALUE ...] <executable> [args...]`: run one command in a workspace-confined directory and print JSON results
 - `groovy-agent <utility> ...`: direct coreutils command mode
 
 ## Safe coding boundaries and non-goals
 
-- No unrestricted shell execution, generic `exec`, or network-fetch tools.
+- No shell string interpolation or unrestricted network-fetch tools.
+- Command execution uses explicit executable + argument arrays and workspace-confined working directories.
 - File tools are confined to a canonical workspace root.
 - Path traversal (`..`), absolute paths outside workspace, and symlink escapes
   are rejected.

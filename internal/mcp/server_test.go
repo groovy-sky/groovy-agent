@@ -117,7 +117,7 @@ func TestServeWithConfigListsAgentTools(t *testing.T) {
 	if err := ServeWithConfig(context.Background(), strings.NewReader(input), &output, cfg); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"list_files", "read_file", "search_files", "write_file", "apply_patch", "mkdir", "git_status", "git_diff", "run_coreutil"} {
+	for _, name := range []string{"list_files", "read_file", "search_files", "write_file", "apply_patch", "mkdir", "git_status", "git_diff", "run_coreutil", "exec_command"} {
 		if !strings.Contains(output.String(), `"name":"`+name+`"`) {
 			t.Fatalf("expected tool %s in ServeWithConfig output: %s", name, output.String())
 		}
@@ -125,5 +125,48 @@ func TestServeWithConfigListsAgentTools(t *testing.T) {
 	// Individual coreutils should NOT appear; they're routed via run_coreutil.
 	if strings.Contains(output.String(), `"name":"cat"`) {
 		t.Fatalf("cat should not appear as its own tool in agent MCP mode: %s", output.String())
+	}
+}
+
+func TestServeWithConfigExecCommand(t *testing.T) {
+	tmp := t.TempDir()
+	ws, err := workspace.New(tmp, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := approval.Policy{Yolo: true}
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"exec_command","arguments":{"executable":"go","args":["env","GOVERSION"],"timeout_seconds":10}}}`,
+		"",
+	}, "\n")
+	var output bytes.Buffer
+	cfg := Config{Workspace: ws, Policy: &policy}
+	if err := ServeWithConfig(context.Background(), strings.NewReader(input), &output, cfg); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("unexpected response count: %s", output.String())
+	}
+	var call struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &call); err != nil {
+		t.Fatal(err)
+	}
+	if len(call.Result.Content) != 1 {
+		t.Fatalf("unexpected call content: %s", lines[1])
+	}
+	if !strings.Contains(call.Result.Content[0].Text, `"success":true`) {
+		t.Fatalf("expected success result: %s", call.Result.Content[0].Text)
+	}
+	if !strings.Contains(call.Result.Content[0].Text, "go1.") {
+		t.Fatalf("expected go version output: %s", call.Result.Content[0].Text)
 	}
 }
