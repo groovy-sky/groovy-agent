@@ -456,6 +456,42 @@ func TestCompleteTurnRequiringWritesAcceptsTextualRepairToolCall(t *testing.T) {
 	}
 }
 
+func TestCompleteTurnRequiringWritesSharesToolBudgetWithRepair(t *testing.T) {
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestCount++
+		switch requestCount {
+		case 1:
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"other.txt\",\"content\":\"wrong\"}"}}]}}]}`)
+		case 2:
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+		default:
+			t.Fatalf("tool budget should prevent a repair request, got request %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	ws, err := workspace.New(t.TempDir(), workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
+	events := make([]ToolEvent, 0)
+	dispatcher := &eventDispatcher{
+		base:      &toolRuntime{workspace: ws, policy: approval.Policy{Yolo: true, Interactive: false}},
+		workspace: ws,
+		events:    &events,
+	}
+
+	_, _, err = completeTurnRequiringWritesWithLimit(context.Background(), client, []message{{Role: "user", Content: "write time.txt"}}, openAITools(), dispatcher, ws, []string{"time.txt"}, &events, 1)
+	if err == nil || err.Error() != "required write was not completed: time.txt" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if requestCount != 2 {
+		t.Fatalf("request count = %d", requestCount)
+	}
+}
+
 func TestCompleteTurnDoesNotTreatProseJSONAsToolCall(t *testing.T) {
 	dispatcher := &recordingDispatcher{}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

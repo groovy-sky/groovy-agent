@@ -786,6 +786,8 @@ func completeTurnRequiringWrites(ctx context.Context, client chatClient, message
 }
 
 func completeTurnRequiringWritesWithLimit(ctx context.Context, client chatClient, messages []message, tools []toolDefinition, dispatcher toolDispatcher, ws *workspace.Workspace, requiredWrites []string, events *[]ToolEvent, maxToolRounds int) ([]message, string, error) {
+	maxToolRounds = normalizeMaxToolRounds(maxToolRounds)
+	initialMessageCount := len(messages)
 	updated, answer, err := completeTurnWithRuntimeOptions(ctx, client, messages, tools, dispatcher, false, maxToolRounds)
 	if err != nil || len(requiredWrites) == 0 {
 		return updated, answer, err
@@ -794,11 +796,15 @@ func completeTurnRequiringWritesWithLimit(ctx context.Context, client chatClient
 	if len(unmet) == 0 {
 		return updated, answer, nil
 	}
+	remainingToolRounds := maxToolRounds - countToolRounds(updated[initialMessageCount:])
+	if remainingToolRounds <= 0 {
+		return updated, answer, requiredWriteError(unmet[0])
+	}
 	repairMessages := append(append([]message{}, updated...), message{
 		Role:    "user",
 		Content: buildRequiredWriteRepairPrompt(unmet),
 	})
-	repaired, repairedAnswer, repairErr := completeTurnWithRuntimeOptions(ctx, client, repairMessages, tools, dispatcher, true, maxToolRounds)
+	repaired, repairedAnswer, repairErr := completeTurnWithRuntimeOptions(ctx, client, repairMessages, tools, dispatcher, true, remainingToolRounds)
 	if repairErr == nil {
 		updated = repaired
 		answer = repairedAnswer
@@ -810,6 +816,16 @@ func completeTurnRequiringWritesWithLimit(ctx context.Context, client chatClient
 		return updated, answer, nil
 	}
 	return updated, answer, requiredWriteError(unmet[0])
+}
+
+func countToolRounds(messages []message) int {
+	count := 0
+	for _, current := range messages {
+		if current.Role == "assistant" && len(current.ToolCalls) > 0 {
+			count++
+		}
+	}
+	return count
 }
 
 func normalizeMaxToolRounds(value int) int {
