@@ -66,6 +66,7 @@ func TestCompleteTurnExecutesToolCall(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
+
 		switch requestCount {
 		case 1:
 			if payload.ToolChoice != "auto" {
@@ -104,6 +105,72 @@ func TestCompleteTurnExecutesToolCall(t *testing.T) {
 	}
 	if got := len(messages); got != 5 {
 		t.Fatalf("message count = %d", got)
+	}
+}
+
+func TestCompleteTurnSynthesizesAnswerWhenToolBudgetIsExhausted(t *testing.T) {
+	var requestCount int
+	dispatcher := &recordingDispatcher{}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestCount++
+		var payload chatRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		switch requestCount {
+		case 1, 2:
+			if payload.ToolChoice != "auto" {
+				t.Fatalf("tool round %d choice = %#v", requestCount, payload.ToolChoice)
+			}
+			fmt.Fprintf(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_%d","type":"function","function":{"name":"git_status","arguments":"{}"}}]}}]}`, requestCount)
+		case 3:
+			if payload.ToolChoice != "none" {
+				t.Fatalf("synthesis tool_choice = %#v", payload.ToolChoice)
+			}
+			if len(payload.Tools) != 0 {
+				t.Fatalf("synthesis tools = %+v", payload.Tools)
+			}
+			last := payload.Messages[len(payload.Messages)-1]
+			if last.Role != "user" || !strings.Contains(last.Content.(string), "budget of 2 rounds") {
+				t.Fatalf("missing budget synthesis prompt: %+v", last)
+			}
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"Two checks completed; validation remains."}}]}`)
+		default:
+			t.Fatalf("unexpected request count %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
+	messages, answer, err := completeTurnWithRuntimeOptions(context.Background(), client, []message{{Role: "user", Content: "inspect"}}, openAITools(), dispatcher, false, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "Two checks completed; validation remains." {
+		t.Fatalf("answer = %q", answer)
+	}
+	if len(dispatcher.calls) != 2 {
+		t.Fatalf("dispatcher call count = %d", len(dispatcher.calls))
+	}
+	if len(messages) == 0 || messages[len(messages)-1].Role != "assistant" {
+		t.Fatalf("expected synthesized answer in transcript: %+v", messages)
+	}
+}
+
+func TestCompleteTurnEmptyResponsePreservesTranscript(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":""}}]}`)
+	}))
+	defer server.Close()
+
+	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
+	initial := []message{{Role: "user", Content: "inspect"}}
+	messages, _, err := completeTurnWithRuntime(context.Background(), client, initial, openAITools(), &recordingDispatcher{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if len(messages) != len(initial) {
+		t.Fatalf("messages = %+v", messages)
 	}
 }
 
