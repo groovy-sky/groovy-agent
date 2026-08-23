@@ -324,11 +324,16 @@ policy.
 ## Headless mode
 
 ```sh
-go run . run -p "summarize current diff" [--workspace PATH] [--output text|json] [--plan] [--yolo] [--resume SESSION_ID] [--require-write PATH ...]
+go run . run -p "summarize current diff" [--workspace PATH] [--output text|json] [--plan] [--yolo] [--resume SESSION_ID] [--require-write PATH ...] [--max-tool-rounds N]
 ```
 
 In non-interactive mode without `--yolo`, mutating tools are denied instead of
 prompting.
+
+The agent follows an inspect, edit, validate, and diff-review workflow for code
+changes. `--max-tool-rounds` bounds tool-using model rounds per turn (default
+24). If the budget is exhausted, tools are disabled for one final response so
+the agent can summarize completed work, validation, and anything left undone.
 
 In headless mode, each `--require-write PATH` flag adds a verified postcondition
 for the run. A run exits with failure unless `write_file` successfully writes

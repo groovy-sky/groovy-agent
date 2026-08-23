@@ -55,6 +55,7 @@ func runAgent(ctx context.Context, args []string) int {
 	planMode := flags.Bool("plan", false, "Enable read-only planning mode")
 	yolo := flags.Bool("yolo", false, "Automatically approve mutations")
 	resumeID := flags.String("resume", "", "Resume from session id")
+	maxToolRounds := flags.Int("max-tool-rounds", agent.DefaultMaxToolRounds, "Maximum model rounds that may request tools")
 	var requireWrite multiStringFlag
 	flags.Var(&requireWrite, "require-write", "Require a successful write to this workspace-relative path (repeatable)")
 	if err := flags.Parse(args); err != nil {
@@ -66,6 +67,7 @@ func runAgent(ctx context.Context, args []string) int {
 		Yolo:          *yolo,
 		ResumeID:      *resumeID,
 		RequireWrite:  append([]string{}, requireWrite...),
+		MaxToolRounds: *maxToolRounds,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitRuntimeError
@@ -83,6 +85,7 @@ func runHeadless(ctx context.Context, args []string) int {
 	resumeID := flags.String("resume", "", "Resume from session id")
 	outputFormat := flags.String("output", "text", "Output format: text or json")
 	outputDir := flags.String("output-dir", outputDirDefault(), "Directory for persisted result JSON files")
+	maxToolRounds := flags.Int("max-tool-rounds", agent.DefaultMaxToolRounds, "Maximum model rounds that may request tools")
 	var requireWrite multiStringFlag
 	flags.Var(&requireWrite, "require-write", "Require a successful write to this workspace-relative path (repeatable)")
 	if err := flags.Parse(args); err != nil {
@@ -99,6 +102,7 @@ func runHeadless(ctx context.Context, args []string) int {
 		ResumeID:      *resumeID,
 		RequireWrite:  append([]string{}, requireWrite...),
 		OutputDir:     *outputDir,
+		MaxToolRounds: *maxToolRounds,
 	})
 	if err != nil {
 		if *outputFormat == "json" {
