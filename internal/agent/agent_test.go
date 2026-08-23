@@ -131,7 +131,8 @@ func TestCompleteTurnSynthesizesAnswerWhenToolBudgetIsExhausted(t *testing.T) {
 				t.Fatalf("synthesis tools = %+v", payload.Tools)
 			}
 			last := payload.Messages[len(payload.Messages)-1]
-			if last.Role != "user" || !strings.Contains(last.Content.(string), "budget of 2 rounds") {
+			content, ok := last.Content.(string)
+			if !ok || last.Role != "user" || !strings.Contains(content, "budget of 2 rounds") {
 				t.Fatalf("missing budget synthesis prompt: %+v", last)
 			}
 			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"Two checks completed; validation remains."}}]}`)

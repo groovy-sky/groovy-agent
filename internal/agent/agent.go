@@ -840,8 +840,8 @@ func synthesizeBudgetExhaustedTurn(ctx context.Context, client chatClient, messa
 		Role:    "user",
 		Content: fmt.Sprintf("The tool budget of %d rounds is exhausted. Do not call tools. Briefly summarize completed work, validation performed, and any remaining work or uncertainty.", maxToolRounds),
 	}
-	messages = append(messages, synthesisPrompt)
-	assistantMessage, err := client.Complete(ctx, messages, nil, chatCompleteOptions{ToolChoice: "none"})
+	requestMessages := append(append([]message{}, messages...), synthesisPrompt)
+	assistantMessage, err := client.Complete(ctx, requestMessages, nil, chatCompleteOptions{ToolChoice: "none"})
 	if err != nil {
 		return messages, "", fmt.Errorf("tool budget exhausted after %d rounds; final summary failed: %w", maxToolRounds, err)
 	}
@@ -852,7 +852,7 @@ func synthesizeBudgetExhaustedTurn(ctx context.Context, client chatClient, messa
 	if strings.TrimSpace(text) == "" {
 		return messages, "", fmt.Errorf("tool budget exhausted after %d rounds; assistant returned an empty final summary", maxToolRounds)
 	}
-	messages = append(messages, message{Role: "assistant", Content: text})
+	messages = append(requestMessages, message{Role: "assistant", Content: text})
 	return messages, text, nil
 }
 
