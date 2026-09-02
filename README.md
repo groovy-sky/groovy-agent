@@ -45,8 +45,13 @@ Inside the container:
 
 The agent exposes a safe coding toolset (workspace-confined file read/write,
 bounded search/listing, fixed `git status`/`git diff` helpers, `run_coreutil`,
-and `exec_command`). `exec_command` runs an explicit executable + argument list
-inside the workspace (no shell interpolation).
+`exec_command`, and a dedicated `run_tests` validation tool). `exec_command`
+runs an explicit executable + argument list inside the workspace (no shell
+interpolation). `run_tests` runs the repository's standard `go test ./...`
+command from the workspace root with a bounded timeout and a minimal child
+environment (it does not inherit the agent's full environment, so local
+model/API credentials are not exposed); it is intended for validating changes
+after edits and never requires mutation approval.
 
 ### Requirements
 
@@ -306,7 +311,10 @@ Mutation tools (`write_file`, `apply_patch`, `mkdir`) require approval by
 default. Use `--yolo` to auto-approve. Use `--plan` to deny mutations while
 returning structured planning feedback to the model. `--require-write` verifies
 that a specific file write happened; it does not bypass approval, so interactive
-approval or `--yolo` is still required for the write itself.
+approval or `--yolo` is still required for the write itself. `exec_command` is
+also subject to this approval policy, but `run_tests` is a dedicated read-only
+validation tool and always runs without approval, in any mode (including plan
+mode and without `--yolo`).
 
 Sessions are persisted as JSONL snapshots under:
 
