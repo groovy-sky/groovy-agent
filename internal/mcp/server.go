@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -298,6 +299,14 @@ func agentTools() map[string]any {
 					"inherit_env":     map[string]any{"type": "boolean"},
 					"env":             map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
 				},
+			},
+		},
+		{
+			Name:        "run_tests",
+			Description: "Run the repository's standard Go test command (`go test ./...`) from the workspace root. Use this after making source or test changes to validate them.",
+			InputSchema: map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
 			},
 		},
 	}
@@ -634,10 +643,68 @@ func callAgentTool(ctx context.Context, name string, rawArgs json.RawMessage, cf
 		result.Data = execResult
 		return mcpContent(marshalResult(result)), nil
 
+	case "run_tests":
+		// run_tests is a dedicated, read-only validation tool: it never
+		// requires mutation approval, works in normal/headless mode without
+		// --yolo, and plan mode does not treat it as a mutation.
+		const testTimeout = 5 * time.Minute
+		execResult, err := commandexec.Execute(ctx, commandexec.Options{
+			WorkspaceRoot: cfg.Workspace.Root,
+			Executable:    "go",
+			Args:          []string{"test", "./..."},
+			Timeout:       testTimeout,
+			Env:           minimalGoEnv(),
+			InheritEnv:    false,
+		})
+		if err != nil {
+			result.Error = err.Error()
+			result.Data = execResult
+			return mcpContent(marshalResult(result)), nil
+		}
+		if execResult.TimedOut {
+			result.Error = fmt.Sprintf("run_tests timed out after %s", testTimeout)
+			result.Data = execResult
+			return mcpContent(marshalResult(result)), nil
+		}
+		if execResult.Canceled {
+			result.Error = "run_tests canceled"
+			result.Data = execResult
+			return mcpContent(marshalResult(result)), nil
+		}
+		if execResult.ExitCode != 0 {
+			result.Error = fmt.Sprintf("go test ./... exited with status %d", execResult.ExitCode)
+			result.Data = execResult
+			return mcpContent(marshalResult(result)), nil
+		}
+		result.Success = true
+		result.Data = execResult
+		return mcpContent(marshalResult(result)), nil
+
 	default:
 		result.Error = fmt.Sprintf("unsupported tool %q", name)
 		return mcpContent(marshalResult(result)), nil
 	}
+}
+
+// minimalGoEnv returns a small, explicit set of environment variables copied
+// from the current process that the Go toolchain needs to run "go test"
+// successfully (PATH, HOME, Go build/module caches, temp dirs, locale). It
+// deliberately omits everything else — including model/API credentials and
+// other unrelated values — since run_tests always runs with InheritEnv:
+// false.
+func minimalGoEnv() map[string]string {
+	allowed := []string{
+		"PATH", "HOME", "GOPATH", "GOROOT", "GOCACHE", "GOMODCACHE",
+		"GOFLAGS", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB", "GO111MODULE",
+		"TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL",
+	}
+	env := make(map[string]string, len(allowed))
+	for _, key := range allowed {
+		if value, ok := os.LookupEnv(key); ok {
+			env[key] = value
+		}
+	}
+	return env
 }
 
 // evaluateMutation checks the policy and optionally prompts the user.

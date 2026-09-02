@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -117,7 +119,7 @@ func TestServeWithConfigListsAgentTools(t *testing.T) {
 	if err := ServeWithConfig(context.Background(), strings.NewReader(input), &output, cfg); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"list_files", "read_file", "search_files", "write_file", "apply_patch", "mkdir", "git_status", "git_diff", "run_coreutil", "exec_command"} {
+	for _, name := range []string{"list_files", "read_file", "search_files", "write_file", "apply_patch", "mkdir", "git_status", "git_diff", "run_coreutil", "exec_command", "run_tests"} {
 		if !strings.Contains(output.String(), `"name":"`+name+`"`) {
 			t.Fatalf("expected tool %s in ServeWithConfig output: %s", name, output.String())
 		}
@@ -168,5 +170,113 @@ func TestServeWithConfigExecCommand(t *testing.T) {
 	}
 	if !strings.Contains(call.Result.Content[0].Text, "go1.") {
 		t.Fatalf("expected go version output: %s", call.Result.Content[0].Text)
+	}
+}
+
+func TestServeWithConfigRunTestsSuccess(t *testing.T) {
+	tmp := t.TempDir()
+	writeGoModuleFixture(t, tmp, "func TestOK(t *testing.T) {}\n")
+
+	ws, err := workspace.New(tmp, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Non-interactive, non-yolo, non-plan policy: run_tests must not require
+	// approval like the mutation tools do.
+	policy := approval.Policy{}
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"run_tests","arguments":{}}}`,
+		"",
+	}, "\n")
+	var output bytes.Buffer
+	cfg := Config{Workspace: ws, Policy: &policy}
+	if err := ServeWithConfig(context.Background(), strings.NewReader(input), &output, cfg); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("unexpected response count: %s", output.String())
+	}
+	var call struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &call); err != nil {
+		t.Fatal(err)
+	}
+	if len(call.Result.Content) != 1 {
+		t.Fatalf("unexpected call content: %s", lines[1])
+	}
+	text := call.Result.Content[0].Text
+	if !strings.Contains(text, `"success":true`) {
+		t.Fatalf("expected success result: %s", text)
+	}
+	if !strings.Contains(text, `"exit_code":0`) {
+		t.Fatalf("expected exit_code 0: %s", text)
+	}
+}
+
+func TestServeWithConfigRunTestsFailure(t *testing.T) {
+	tmp := t.TempDir()
+	writeGoModuleFixture(t, tmp, "func TestFails(t *testing.T) { t.Fatal(\"boom\") }\n")
+
+	ws, err := workspace.New(tmp, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := approval.Policy{}
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"run_tests","arguments":{}}}`,
+		"",
+	}, "\n")
+	var output bytes.Buffer
+	cfg := Config{Workspace: ws, Policy: &policy}
+	if err := ServeWithConfig(context.Background(), strings.NewReader(input), &output, cfg); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("unexpected response count: %s", output.String())
+	}
+	var call struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &call); err != nil {
+		t.Fatal(err)
+	}
+	if len(call.Result.Content) != 1 {
+		t.Fatalf("unexpected call content: %s", lines[1])
+	}
+	text := call.Result.Content[0].Text
+	if !strings.Contains(text, `"success":false`) {
+		t.Fatalf("expected failure result: %s", text)
+	}
+	if strings.Contains(text, `"exit_code":0`) {
+		t.Fatalf("expected non-zero exit_code: %s", text)
+	}
+}
+
+// writeGoModuleFixture writes a minimal, isolated Go module with a single
+// test file so "go test ./..." can be exercised deterministically.
+func writeGoModuleFixture(t *testing.T, root, testBody string) {
+	t.Helper()
+	goMod := "module runtestsfixture\n\ngo 1.21\n"
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte(goMod), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testFile := "package runtestsfixture\n\nimport \"testing\"\n\n" + testBody
+	if err := os.WriteFile(filepath.Join(root, "fixture_test.go"), []byte(testFile), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

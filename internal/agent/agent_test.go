@@ -902,3 +902,55 @@ func (d *recordingDispatcher) Execute(_ context.Context, call toolCall) string {
 	d.calls = append(d.calls, call)
 	return `{"success":true}`
 }
+
+func TestMCPRunTestsAllowedInPlanModeViaMCP(t *testing.T) {
+	// run_tests is a dedicated validation tool: it must run even in plan mode
+	// and without --yolo, since it is never treated as a mutation.
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module runtestsfixture\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testFile := "package runtestsfixture\n\nimport \"testing\"\n\nfunc TestOK(t *testing.T) {}\n"
+	if err := os.WriteFile(filepath.Join(root, "fixture_test.go"), []byte(testFile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ws, err := workspace.New(root, workspace.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := mcp.Config{
+		Workspace: ws,
+		Policy:    &approval.Policy{PlanMode: true, Interactive: false},
+	}
+	mcpCli, stop, err := startInProcessMCP(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	dispatcher := &mcpDispatcher{client: mcpCli}
+	call := toolCall{
+		ID:   "test-run-tests-1",
+		Type: "function",
+		Function: toolFunction{
+			Name:      "run_tests",
+			Arguments: map[string]any{},
+		},
+	}
+	output := dispatcher.Execute(context.Background(), call)
+	if strings.Contains(output, "plan_mode_denied") {
+		t.Fatalf("run_tests must not be denied in plan mode: %s", output)
+	}
+	if !strings.Contains(output, `"success":true`) {
+		t.Fatalf("expected success result: %s", output)
+	}
+}
+
+func TestBaseSystemPromptMentionsRunTestsWorkflow(t *testing.T) {
+	for _, want := range []string{"run_tests", "apply_patch", "write_file", "git_diff"} {
+		if !strings.Contains(baseSystemPrompt, want) {
+			t.Fatalf("baseSystemPrompt missing %q: %s", want, baseSystemPrompt)
+		}
+	}
+}
