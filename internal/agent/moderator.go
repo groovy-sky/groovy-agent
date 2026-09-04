@@ -116,15 +116,18 @@ func applyPlanToolCalls(ctx context.Context, base []message, calls []moderator.T
 		})
 	}
 	updated := append(append([]message{}, base...), message{Role: "assistant", ToolCalls: toolCalls})
-	initialEventCount := len(eventSlice(events))
 	for _, call := range toolCalls {
+		eventCountBefore := len(eventSlice(events))
 		output := dispatcher.Execute(ctx, call)
 		updated = append(updated, message{Role: "tool", ToolCallID: call.ID, Name: call.Function.Name, Content: output})
-	}
-	for _, event := range eventSlice(events)[initialEventCount:] {
-		switch event.DeniedCode {
-		case "approval_required_non_interactive", "plan_mode_denied", "approval_denied":
-			return updated, errors.New(event.DeniedCode)
+		for _, event := range eventSlice(events)[eventCountBefore:] {
+			switch event.DeniedCode {
+			case "approval_required_non_interactive", "plan_mode_denied", "approval_denied":
+				// Stop dispatching further planned calls immediately: a
+				// denied call must not let later, potentially destructive
+				// calls in the same plan still execute.
+				return updated, errors.New(event.DeniedCode)
+			}
 		}
 	}
 	return updated, nil

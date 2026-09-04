@@ -1045,6 +1045,42 @@ func TestRunHeadlessModeratorRejectsFreeFormPlan(t *testing.T) {
 	}
 }
 
+// TestRunHeadlessModeratorStopsDispatchAfterDeniedCall ensures that when a
+// plan contains multiple tool_calls and an earlier one is denied by policy,
+// later calls in the same plan are never dispatched.
+func TestRunHeadlessModeratorStopsDispatchAfterDeniedCall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"use_tools\",\"tool_calls\":[{\"name\":\"write_file\",\"arguments\":{\"path\":\"first.txt\",\"content\":\"a\"}},{\"name\":\"write_file\",\"arguments\":{\"path\":\"second.txt\",\"content\":\"b\"}}]}"}}]}`)
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "test-model")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	workspaceRoot := t.TempDir()
+	// No --yolo and non-interactive: mutations are denied instead of prompted.
+	result, err := RunHeadless(context.Background(), "write two files", Options{
+		WorkspacePath: workspaceRoot,
+		OutputDir:     filepath.Join(t.TempDir(), "results"),
+	})
+	if err == nil {
+		t.Fatal("expected error for denied mutation")
+	}
+	if err.Error() != "approval_required_non_interactive" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Events) != 1 {
+		t.Fatalf("expected exactly one recorded event (dispatch must stop after the denial), got %+v", result.Events)
+	}
+	if _, statErr := os.Stat(filepath.Join(workspaceRoot, "first.txt")); statErr == nil {
+		t.Fatal("first.txt should not have been written")
+	}
+	if _, statErr := os.Stat(filepath.Join(workspaceRoot, "second.txt")); statErr == nil {
+		t.Fatal("second.txt should not have been dispatched after the first call was denied")
+	}
+}
+
 type recordingDispatcher struct {
 	calls []toolCall
 }
