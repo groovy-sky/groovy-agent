@@ -799,6 +799,9 @@ func TestPersistResultUsesDefaultDirWhenEmpty(t *testing.T) {
 }
 
 func TestRunHeadlessPreservesPersistenceOnRequiredWriteFailure(t *testing.T) {
+	// Simulates the reported failure mode: the moderator plans and executes a
+	// write to the wrong file, then a repair plan still fails to satisfy the
+	// required write, so the run must fail rather than report success.
 	var requestCount int
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		requestCount++
@@ -806,16 +809,14 @@ func TestRunHeadlessPreservesPersistenceOnRequiredWriteFailure(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
+		if payload.ToolChoice != "none" {
+			t.Fatalf("request %d tool_choice = %#v", requestCount, payload.ToolChoice)
+		}
 		switch requestCount {
 		case 1:
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"other.txt\",\"content\":\"wrong\"}"}}]}}]}`)
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"use_tools\",\"tool_calls\":[{\"name\":\"write_file\",\"arguments\":{\"path\":\"other.txt\",\"content\":\"wrong\"}}]}"}}]}`)
 		case 2:
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
-		case 3:
-			if payload.ToolChoice != "required" {
-				t.Fatalf("repair tool_choice = %#v", payload.ToolChoice)
-			}
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"still done"}}]}`)
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"answer\",\"reason\":\"nothing more to do\"}"}}]}`)
 		default:
 			t.Fatalf("unexpected request count %d", requestCount)
 		}
@@ -840,8 +841,11 @@ func TestRunHeadlessPreservesPersistenceOnRequiredWriteFailure(t *testing.T) {
 	if err.Error() != "required write was not completed: time.txt" {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Answer != "still done" {
-		t.Fatalf("answer = %q", result.Answer)
+	if !strings.Contains(result.Answer, "Files changed: other.txt") {
+		t.Fatalf("answer missing verified changed file: %q", result.Answer)
+	}
+	if !strings.Contains(result.Answer, "Unmet required writes: time.txt") {
+		t.Fatalf("answer missing unmet required write: %q", result.Answer)
 	}
 	if len(result.Events) == 0 || result.Events[0].Path != "other.txt" || !result.Events[0].Success {
 		t.Fatalf("unexpected events: %+v", result.Events)
@@ -871,7 +875,14 @@ func TestRunHeadlessWithoutRequireWritePreservesExistingBehavior(t *testing.T) {
 	var requestCount int
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		requestCount++
-		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+		switch requestCount {
+		case 1:
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"answer\"}"}}]}`)
+		case 2:
+			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+		default:
+			t.Fatalf("unexpected request count %d", requestCount)
+		}
 	}))
 	defer server.Close()
 
@@ -889,8 +900,184 @@ func TestRunHeadlessWithoutRequireWritePreservesExistingBehavior(t *testing.T) {
 	if result.Answer != "done" {
 		t.Fatalf("answer = %q", result.Answer)
 	}
-	if requestCount != 1 {
+	if requestCount != 2 {
 		t.Fatalf("request count = %d", requestCount)
+	}
+}
+
+// TestRunHeadlessModeratorDateOnlyPlanCannotClaimWriteCompleted reproduces
+// the originally reported failure: a plan that only reads the date via
+// run_coreutil, without ever calling write_file, must not be able to report
+// time.txt as written. Both the initial plan and the repair plan omit the
+// write, so the run must fail with the required-write error and the verified
+// report must not list time.txt as changed.
+func TestRunHeadlessModeratorDateOnlyPlanCannotClaimWriteCompleted(t *testing.T) {
+	var requestCount int
+	dateOnlyPlan := `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"use_tools\",\"tool_calls\":[{\"name\":\"run_coreutil\",\"arguments\":{\"utility\":\"date\",\"args\":[\"+%Y-%m-%d\"]}}]}"}}]}`
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestCount++
+		switch requestCount {
+		case 1, 2:
+			_, _ = io.WriteString(writer, dateOnlyPlan)
+		default:
+			t.Fatalf("unexpected request count %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "test-model")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	result, err := RunHeadless(context.Background(), "obtain the current date and store it in time.txt", Options{
+		WorkspacePath: t.TempDir(),
+		Yolo:          true,
+		RequireWrite:  []string{"time.txt"},
+		OutputDir:     filepath.Join(t.TempDir(), "results"),
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if err.Error() != "required write was not completed: time.txt" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(result.Answer, "Files changed: time.txt") {
+		t.Fatalf("answer falsely claims time.txt was written: %q", result.Answer)
+	}
+	if !strings.Contains(result.Answer, "Unmet required writes: time.txt") {
+		t.Fatalf("answer missing unmet required write: %q", result.Answer)
+	}
+	if !strings.Contains(result.Answer, "Commands run: run_coreutil") {
+		t.Fatalf("answer missing verified command: %q", result.Answer)
+	}
+	for _, event := range result.Events {
+		if event.Tool == "write_file" {
+			t.Fatalf("unexpected write_file event recorded for a date-only plan: %+v", event)
+		}
+	}
+}
+
+// TestRunHeadlessModeratorSuccessfulWriteFileFlow verifies that when the
+// moderator plans and successfully executes a write_file call matching an
+// accepted require_writes entry, the run succeeds and the verified report
+// reflects the actual write.
+func TestRunHeadlessModeratorSuccessfulWriteFileFlow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"use_tools\",\"reason\":\"write the date to time.txt\",\"tool_calls\":[{\"name\":\"write_file\",\"arguments\":{\"path\":\"time.txt\",\"content\":\"2026-09-04\\n\"}}],\"require_writes\":[\"time.txt\"]}"}}]}`)
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "test-model")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	workspaceRoot := t.TempDir()
+	result, err := RunHeadless(context.Background(), "store the current date in time.txt", Options{
+		WorkspacePath: workspaceRoot,
+		Yolo:          true,
+		OutputDir:     filepath.Join(t.TempDir(), "results"),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result.Answer, "Files changed: time.txt") {
+		t.Fatalf("answer missing verified changed file: %q", result.Answer)
+	}
+	if strings.Contains(result.Answer, "Unmet required writes") {
+		t.Fatalf("answer should not list unmet required writes: %q", result.Answer)
+	}
+	data, readErr := os.ReadFile(filepath.Join(workspaceRoot, "time.txt"))
+	if readErr != nil {
+		t.Fatalf("expected time.txt to exist: %v", readErr)
+	}
+	if string(data) != "2026-09-04\n" {
+		t.Fatalf("time.txt content = %q", string(data))
+	}
+}
+
+// TestRunHeadlessModeratorRejectsUnknownTool ensures a plan that requests a
+// tool outside the allow-list is rejected rather than executed, even after
+// one corrective retry.
+func TestRunHeadlessModeratorRejectsUnknownTool(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"use_tools\",\"tool_calls\":[{\"name\":\"delete_everything\",\"arguments\":{}}]}"}}]}`)
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "test-model")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	_, err := RunHeadless(context.Background(), "delete everything", Options{
+		WorkspacePath: t.TempDir(),
+		Yolo:          true,
+		OutputDir:     filepath.Join(t.TempDir(), "results"),
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown tool plan")
+	}
+	if !strings.Contains(err.Error(), "moderator planning failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestRunHeadlessModeratorRejectsFreeFormPlan ensures free-form prose instead
+// of a JSON plan is rejected rather than executed or treated as an answer.
+func TestRunHeadlessModeratorRejectsFreeFormPlan(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"Sure! I will go ahead and do that for you now."}}]}`)
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "test-model")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	_, err := RunHeadless(context.Background(), "do something", Options{
+		WorkspacePath: t.TempDir(),
+		OutputDir:     filepath.Join(t.TempDir(), "results"),
+	})
+	if err == nil {
+		t.Fatal("expected error for free-form plan response")
+	}
+	if !strings.Contains(err.Error(), "moderator planning failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestRunHeadlessModeratorStopsDispatchAfterDeniedCall ensures that when a
+// plan contains multiple tool_calls and an earlier one is denied by policy,
+// later calls in the same plan are never dispatched.
+func TestRunHeadlessModeratorStopsDispatchAfterDeniedCall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"use_tools\",\"tool_calls\":[{\"name\":\"write_file\",\"arguments\":{\"path\":\"first.txt\",\"content\":\"a\"}},{\"name\":\"write_file\",\"arguments\":{\"path\":\"second.txt\",\"content\":\"b\"}}]}"}}]}`)
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "token")
+	t.Setenv("OPENAI_MODEL", "test-model")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	workspaceRoot := t.TempDir()
+	// No --yolo and non-interactive: mutations are denied instead of prompted.
+	result, err := RunHeadless(context.Background(), "write two files", Options{
+		WorkspacePath: workspaceRoot,
+		OutputDir:     filepath.Join(t.TempDir(), "results"),
+	})
+	if err == nil {
+		t.Fatal("expected error for denied mutation")
+	}
+	if err.Error() != "approval_required_non_interactive" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Events) != 1 {
+		t.Fatalf("expected exactly one recorded event (dispatch must stop after the denial), got %+v", result.Events)
+	}
+	if _, statErr := os.Stat(filepath.Join(workspaceRoot, "first.txt")); statErr == nil {
+		t.Fatal("first.txt should not have been written")
+	}
+	if _, statErr := os.Stat(filepath.Join(workspaceRoot, "second.txt")); statErr == nil {
+		t.Fatal("second.txt should not have been dispatched after the first call was denied")
 	}
 }
 
