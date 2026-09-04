@@ -442,7 +442,7 @@ func Run(ctx context.Context, input io.Reader, output, errOutput io.Writer, opti
 		turn := append(append([]message{}, state.messages...), message{Role: "user", Content: line})
 		events := make([]ToolEvent, 0)
 		recordingDispatcher := &eventDispatcher{base: dispatcher, workspace: ws, events: &events}
-		updated, assistantAnswer, turnErr := completeTurnRequiringWritesWithLimit(ctx, chatClient, turn, tools, recordingDispatcher, ws, requiredWrites, &events, options.MaxToolRounds)
+		updated, assistantAnswer, turnErr := completeTurnWithModerator(ctx, chatClient, turn, tools, recordingDispatcher, ws, requiredWrites, &events, options.MaxToolRounds)
 		if turnErr != nil {
 			if len(updated) > 0 {
 				state.messages = updated
@@ -507,7 +507,7 @@ func RunHeadless(ctx context.Context, prompt string, options Options) (RunResult
 		return RunResult{SessionID: sessionID, Events: events}, mcpErr
 	}
 	dispatcher := &eventDispatcher{base: &mcpDispatcher{client: mcpCli}, workspace: ws, events: &events}
-	updated, answer, err := completeTurnRequiringWritesWithLimit(ctx, chatClient, turn, tools, dispatcher, ws, requiredWrites, &events, options.MaxToolRounds)
+	updated, answer, err := completeTurnWithModerator(ctx, chatClient, turn, tools, dispatcher, ws, requiredWrites, &events, options.MaxToolRounds)
 	if err != nil {
 		result := RunResult{SessionID: sessionID, Answer: answer, Events: events}
 		if len(updated) > 0 {
