@@ -99,6 +99,31 @@ in-image and BuildKit secret auth):
 HF_TOKEN=... DOWNLOAD_MODEL_AT_BUILD=1 ./scripts/package-image.sh
 ```
 
+### Container smoke test
+
+Validate the runtime image's packaging and `docker/entrypoint.sh` wiring
+without downloading a model or running real LLM inference:
+
+```sh
+./scripts/container-smoke-test.sh
+```
+
+This builds the `runtime` target with `DOWNLOAD_MODEL=0`, then checks:
+
+- the compiled `/usr/local/bin/groovy-agent` binary is present and its
+  built-in `date` coreutil works;
+- `docker/entrypoint.sh` starts llama-server, waits for it to become ready,
+  and forwards the container command to `groovy-agent` correctly, both when
+  the first argument is already `run`/`agent` and when it needs `agent`
+  prepended.
+
+The forwarding checks replace `llama-server` and `groovy-agent` inside the
+container with deterministic stub scripts (a minimal HTTP server that answers
+`/health`, and a script that records its argv), so no model, GPU, or CPU
+inference is required and no llama-server port is ever published outside the
+container. Set `CONTAINER_ENGINE=podman` to run it with Podman instead of
+Docker.
+
 ### Run the published image (Qwen2.5 model included)
 
 The `ghcr.io/groovy-sky/groovy-agent:qwen2_5` image bundles the Qwen2.5 model,
