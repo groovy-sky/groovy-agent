@@ -24,7 +24,7 @@ Go 1.24 or newer is required.
 ```sh
 go test ./...
 go vet ./...
-go build -o groovy-agent .
+go build -o groovy-agent ./cmd/agent
 ```
 
 The implementation has no third-party runtime or build dependencies.
@@ -34,7 +34,7 @@ The implementation has no third-party runtime or build dependencies.
 This repository includes a self-contained Docker runtime that starts:
 
 1. `llama.cpp` `llama-server` (OpenAI-compatible API on `:8080`)
-2. `groovy-agent agent`, configured to call that local API by default
+2. `groovy-agent`, configured to call that local API by default
 
 Inside the container:
 
@@ -101,8 +101,8 @@ HF_TOKEN=... DOWNLOAD_MODEL_AT_BUILD=1 ./scripts/package-image.sh
 
 ### Container smoke test
 
-Validate the runtime image's packaging and `docker/entrypoint.sh` wiring
-without downloading a model or running real LLM inference:
+Validate the runtime image's packaging and `docker/entrypoint.sh` wiring without
+downloading a model or running real LLM inference:
 
 ```sh
 ./scripts/container-smoke-test.sh
@@ -110,12 +110,11 @@ without downloading a model or running real LLM inference:
 
 This builds the `runtime` target with `DOWNLOAD_MODEL=0`, then checks:
 
-- the compiled `/usr/local/bin/groovy-agent` binary is present and its
-  built-in `date` coreutil works;
+- the compiled `/usr/local/bin/groovy-agent` and `/usr/local/bin/coreutils-mcp`
+  binaries are present;
 - `docker/entrypoint.sh` starts llama-server, waits for it to become ready,
-  and forwards the container command to `groovy-agent` correctly, both when
-  the first argument is already `run`/`agent` and when it needs `agent`
-  prepended.
+  and forwards the container command to `groovy-agent` with the bundled MCP
+  server configured.
 
 The forwarding checks replace `llama-server` and `groovy-agent` inside the
 container with deterministic stub scripts (a minimal HTTP server that answers
@@ -135,7 +134,7 @@ docker run --rm -it \
   ghcr.io/groovy-sky/groovy-agent:qwen2_5
 ```
 
-The entrypoint starts `llama-server` and then launches `groovy-agent agent`.
+The entrypoint starts `llama-server` and then launches `groovy-agent`.
 The llama.cpp API is available on `http://localhost:8080` while the container
 is running. The `--jinja` flag is passed to llama-server to enable Jinja-based
 chat templates, which improve tool prompting for Qwen2.5 models. Every user
@@ -149,29 +148,19 @@ local llama.cpp runs do not depend on `message.tool_calls` support alone.
 You can tune inference with the same environment variables documented below
 (`LLAMA_THREADS`, `LLAMA_CTX_SIZE`, `LLAMA_N_GPU_LAYERS`, etc.).
 
-**Interactive mode with `/output` as workspace:**
+**Run with `/output` as workspace:**
 
 ```sh
 docker run --rm -it \
   -v "$(pwd)/output:/output" \
   -p 8080:8080 \
   ghcr.io/groovy-sky/groovy-agent:qwen2_5 \
-  agent --workspace /output --require-write time.txt
+  --workspace /output "store the current date in time.txt"
 ```
 
-**Headless `run` mode:**
-
-```sh
-docker run --rm \
-  -v "$(pwd)/output:/output" \
-  -p 8080:8080 \
-  ghcr.io/groovy-sky/groovy-agent:qwen2_5 \
-  run -p "store the current date in time.txt" --workspace /output --yolo --require-write time.txt
-```
-
-The entrypoint checks whether the first argument is `agent` or `run` and
-forwards it directly; any other argument (or no argument) defaults to `agent`
-mode.
+The entrypoint forwards all arguments to `groovy-agent` after configuring the
+local llama-server URL, model name, and bundled `/usr/local/bin/coreutils-mcp`
+server.
 
 ### Run with host-mounted model (recommended)
 
@@ -184,14 +173,12 @@ docker run --rm -it \
 ```
 
 The entrypoint starts `llama-server`, waits for readiness, then launches
-`groovy-agent agent`.
+`groovy-agent`.
 
-### Output persistence (headless mode)
+### Output persistence
 
-When running in headless (`run`) mode, each completed run writes a JSON result
-file to the output directory. Inside the container the default is `/output`
-(controlled by `AGENT_OUTPUT_DIR`). Mount a host directory there to receive the
-files automatically:
+Mount `/output` as the workspace when you want the agent to write files back to
+the host:
 
 ```sh
 docker run --rm \
@@ -200,40 +187,13 @@ docker run --rm \
   -e LLAMA_MODEL_PATH=/models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
   -p 8080:8080 \
   groovy-agent:local \
-  run -p "store the current date in time.txt" --workspace /output --yolo --require-write time.txt
+  --workspace /output "store the current date in time.txt"
 ```
 
-**`/output` has two roles depending on mode:**
-
-- As **result persistence directory**: result JSON files (session ID, answer,
-  events) are written here after each headless run.
-- As **workspace**: if you pass `--workspace /output`, the agent also reads and
-  writes files there. Use this when you want the agent to operate on files
-  placed in the mounted output directory.
-
-```sh
-# Interactive mode where /output is also the workspace
-docker run --rm -it \
-  -v "$(pwd)/output:/output" \
-  ghcr.io/groovy-sky/groovy-agent:qwen2_5 \
-  agent --workspace /output --yolo --require-write time.txt
-```
-
-Once in agent mode, try prompts like:
+Once the image starts, try prompts like:
 - `list the files in the workspace at depth 1`
 - `read README.md`
 - `search for the word "agent" in .go files`
-
-Each run produces `<output-dir>/<session-id>.json` containing the session ID,
-final answer, and tool events. The directory is created automatically when the
-agent starts, so no manual setup is required.
-
-To change the output directory without remounting, set `AGENT_OUTPUT_DIR` or
-pass `--output-dir` on the command line:
-
-```sh
-go run . run -p "hello" --output-dir /tmp/results
-```
 
 ### Runtime environment variables
 

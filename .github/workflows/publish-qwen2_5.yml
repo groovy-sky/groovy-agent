@@ -6,11 +6,11 @@ on:
       - main
     paths:
       - Dockerfile
+      - cmd/**
       - docker/**
       - coreutils/**
       - internal/**
       - go.mod
-      - main.go
       - .github/workflows/publish-qwen2_5.yml
   workflow_dispatch:
 
