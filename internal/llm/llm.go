@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// Defaults required by PLAN.md for a 4096-token Qwen2.5 profile.
+// Defaults required by PLAN.md for a 4096-token local model profile.
 const (
 	RequestTimeout  = 180 * time.Second
 	MaxOutputTokens = 256

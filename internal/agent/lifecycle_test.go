@@ -90,7 +90,7 @@ func TestRunEndToEndWithChildProcess(t *testing.T) {
 	stderr := &strings.Builder{}
 	config := Config{
 		LlamaURL:   server.URL,
-		Model:      "local-qwen2.5",
+		Model:      "local-phi-4-mini-instruct",
 		MCPCommand: binary,
 		Workspace:  workspace,
 		Prompt:     "Show the workspace path and identify the likely README.",
@@ -112,7 +112,7 @@ func TestRunEndToEndWithChildProcess(t *testing.T) {
 func TestRunFailsWhenLlamaServerIsUnreachable(t *testing.T) {
 	config := Config{
 		LlamaURL:   "http://127.0.0.1:1",
-		Model:      "local-qwen2.5",
+		Model:      "local-phi-4-mini-instruct",
 		MCPCommand: "/nonexistent/coreutils-mcp",
 		Workspace:  t.TempDir(),
 		Prompt:     "hello",
@@ -142,7 +142,7 @@ func TestRunCancellationLeavesNoChildProcess(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	config := Config{
 		LlamaURL:   server.URL,
-		Model:      "local-qwen2.5",
+		Model:      "local-phi-4-mini-instruct",
 		MCPCommand: binary,
 		Workspace:  workspace,
 		Prompt:     "Show the current workspace path.",

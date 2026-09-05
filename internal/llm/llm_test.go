@@ -23,7 +23,7 @@ func TestCompleteSendsBoundedRequestAndParsesToolCalls(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := New(server.URL, "local-qwen2.5")
+	client := New(server.URL, "local-phi-4-mini-instruct")
 	tools := []Tool{{Type: "function", Function: Function{Name: "pwd", Parameters: map[string]any{"type": "object"}}}}
 	message, err := client.Complete(context.Background(), []Message{{Role: "user", Content: "hi"}}, tools)
 	if err != nil {
@@ -35,7 +35,7 @@ func TestCompleteSendsBoundedRequestAndParsesToolCalls(t *testing.T) {
 	if received["max_tokens"].(float64) != MaxOutputTokens {
 		t.Fatalf("expected max_tokens=%d, got %v", MaxOutputTokens, received["max_tokens"])
 	}
-	if received["model"] != "local-qwen2.5" || received["tool_choice"] != "auto" {
+	if received["model"] != "local-phi-4-mini-instruct" || received["tool_choice"] != "auto" {
 		t.Fatalf("unexpected request %+v", received)
 	}
 }

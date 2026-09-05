@@ -15,8 +15,8 @@ FROM ghcr.io/ggml-org/llama.cpp:server@sha256:092d1291f2bcf59ff727fa3af855fb9bd4
 
 FROM debian:bookworm-slim AS model-fetch
 ARG DOWNLOAD_MODEL=0
-ARG MODEL_URL="https://huggingface.co/unsloth/Qwen2.5-Coder-7B-Instruct-128K-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
-ARG MODEL_FILENAME="Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
+ARG MODEL_URL="https://huggingface.co/unsloth/Phi-4-mini-instruct-GGUF/resolve/main/Phi-4-mini-instruct.Q8_0.gguf"
+ARG MODEL_FILENAME="Phi-4-mini-instruct.Q8_0.gguf"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
@@ -40,8 +40,8 @@ FROM llama-runtime AS runtime
 
 ENV LLAMA_SERVER_HOST=127.0.0.1 \
     LLAMA_SERVER_PORT=8080 \
-    LLAMA_MODEL_FILE=Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
-    LLAMA_MODEL_NAME=Qwen2.5-Coder-7B-Instruct-Q4_K_M \
+    LLAMA_MODEL_FILE=Phi-4-mini-instruct.Q8_0.gguf \
+    LLAMA_MODEL_NAME=Phi-4-mini-instruct \
     LLAMA_CTX_SIZE=8192 \
     LLAMA_THREADS=0 \
     LLAMA_N_GPU_LAYERS=0 \

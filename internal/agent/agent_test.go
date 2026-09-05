@@ -318,7 +318,7 @@ func TestPruneMessagesBoundsHistory(t *testing.T) {
 
 func TestConfigValidate(t *testing.T) {
 	workspace := t.TempDir()
-	base := Config{LlamaURL: "http://127.0.0.1:8080", Model: "local-qwen2.5", MCPCommand: "./bin/coreutils-mcp", Workspace: workspace, Prompt: "hi"}
+	base := Config{LlamaURL: "http://127.0.0.1:8080", Model: "local-phi-4-mini-instruct", MCPCommand: "./bin/coreutils-mcp", Workspace: workspace, Prompt: "hi"}
 	valid := base
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("expected a valid configuration: %v", err)

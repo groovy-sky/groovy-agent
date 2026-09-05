@@ -20,7 +20,7 @@ func main() {
 	config := agent.Config{}
 	flags := flag.NewFlagSet("agent", flag.ExitOnError)
 	flags.StringVar(&config.LlamaURL, "llama-url", "http://127.0.0.1:8080", "base URL of the local llama-server")
-	flags.StringVar(&config.Model, "model", "local-qwen2.5", "model name advertised by llama-server")
+	flags.StringVar(&config.Model, "model", "local-phi-4-mini-instruct", "model name advertised by llama-server")
 	flags.StringVar(&config.MCPCommand, "mcp-command", "./bin/coreutils-mcp", "path to the coreutils MCP server executable")
 	flags.StringVar(&config.Workspace, "workspace", ".", "workspace directory that bounds every filesystem operation")
 	if err := flags.Parse(os.Args[1:]); err != nil {
