@@ -1,140 +1,138 @@
 package coreutils
 
-import (
-	"bytes"
-	"context"
-	"os"
-	"path/filepath"
-	"strings"
-	"testing"
-	"time"
-)
+import "testing"
 
-func execute(t *testing.T, name string, args []string, input string) (string, error) {
-	t.Helper()
-	var output bytes.Buffer
-	err := Run(context.Background(), name, args, strings.NewReader(input), &output, &bytes.Buffer{})
-	return output.String(), err
-}
+func TestHeadAndTailAreBounded(t *testing.T) {
+	text := "one\ntwo\nthree\nfour\n"
 
-func TestCatAndHead(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "input.txt")
-	if err := os.WriteFile(path, []byte("one\ntwo\nthree\n"), 0o600); err != nil {
-		t.Fatal(err)
+	head, truncated := Head(text, 2)
+	if head != "one\ntwo\n" || !truncated {
+		t.Fatalf("unexpected head result %q truncated=%t", head, truncated)
 	}
-	output, err := execute(t, "head", []string{"-n", "2", path}, "")
-	if err != nil {
-		t.Fatal(err)
+
+	tail, truncated := Tail(text, 2)
+	if tail != "three\nfour\n" || !truncated {
+		t.Fatalf("unexpected tail result %q truncated=%t", tail, truncated)
 	}
-	if output != "one\ntwo\n" {
-		t.Fatalf("output = %q", output)
+
+	head, truncated = Head(text, 10)
+	if head != text || truncated {
+		t.Fatalf("short files must not be truncated, got %q truncated=%t", head, truncated)
 	}
 }
 
-func TestBase64RoundTrip(t *testing.T) {
-	encoded, err := execute(t, "base64", nil, "coreutils")
-	if err != nil {
-		t.Fatal(err)
+func TestClampLineEnforcesMaxLineLength(t *testing.T) {
+	long := make([]byte, MaxLineLength+10)
+	for index := range long {
+		long[index] = 'a'
 	}
-	decoded, err := execute(t, "base64", []string{"-d"}, encoded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if decoded != "coreutils" {
-		t.Fatalf("decoded = %q", decoded)
+	clamped, truncated := ClampLine(string(long))
+	if !truncated || len(clamped) != MaxLineLength {
+		t.Fatalf("expected clamped line of %d bytes, got %d truncated=%t", MaxLineLength, len(clamped), truncated)
 	}
 }
 
-func TestUnknownUtility(t *testing.T) {
-	if _, err := execute(t, "missing", nil, ""); err == nil {
-		t.Fatal("expected an error")
+func TestWordCount(t *testing.T) {
+	counts := WordCount("alpha beta\ngamma\n")
+	if counts.Lines != 2 || counts.Words != 3 || counts.Bytes != 17 {
+		t.Fatalf("unexpected counts %+v", counts)
 	}
 }
 
-func TestCutAndSort(t *testing.T) {
-	output, err := execute(t, "cut", []string{"-d", ":", "-f", "1,3"}, "b:two:2\na:one:1\n")
-	if err != nil {
-		t.Fatal(err)
+func TestSortAndUniq(t *testing.T) {
+	if got := Sort("b\na\nb\n", false, false, true); got != "a\nb\n" {
+		t.Fatalf("unexpected sort result %q", got)
 	}
-	output, err = execute(t, "sort", nil, output)
-	if err != nil {
-		t.Fatal(err)
+	if got := Sort("2\n10\n", false, true, false); got != "2\n10\n" {
+		t.Fatalf("unexpected numeric sort result %q", got)
 	}
-	if output != "a:1\nb:2\n" {
-		t.Fatalf("output = %q", output)
+	if got := Uniq("a\na\nb\n", false); got != "a\nb\n" {
+		t.Fatalf("unexpected uniq result %q", got)
 	}
-}
-
-func TestTr(t *testing.T) {
-	output, err := execute(t, "tr", []string{"abc", "ABC"}, "cab\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if output != "CAB\n" {
-		t.Fatalf("output = %q", output)
+	if got := Uniq("a\na\n", true); got != "      2 a\n" {
+		t.Fatalf("unexpected counted uniq result %q", got)
 	}
 }
 
-func TestGrep(t *testing.T) {
-	output, err := execute(t, "grep", []string{"-n", "-v", "-F", "match"}, "match\nother\nmatching\n")
+func TestCutAndPaste(t *testing.T) {
+	got, err := Cut("a:b:c\nd:e:f\n", ":", []int{1, 3})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("cut failed: %v", err)
 	}
-	if output != "2:other\n" {
-		t.Fatalf("output = %q", output)
+	if got != "a:c\nd:f\n" {
+		t.Fatalf("unexpected cut result %q", got)
+	}
+	if _, err := Cut("a\n", ":", []int{0}); err == nil {
+		t.Fatal("expected 1-based field validation to fail")
 	}
 
-	output, err = execute(t, "grep", []string{"a.$"}, "a1\nab\nabc\n")
+	pasted, err := Paste([]string{"a\nb\n", "1\n"}, ",")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("paste failed: %v", err)
 	}
-	if output != "a1\nab\n" {
-		t.Fatalf("output = %q", output)
+	if pasted != "a,1\nb,\n" {
+		t.Fatalf("unexpected paste result %q", pasted)
 	}
 }
 
-func TestCP(t *testing.T) {
-	directory := t.TempDir()
-	source := filepath.Join(directory, "source")
-	destination := filepath.Join(directory, "destination")
-	if err := os.WriteFile(source, []byte("contents"), 0o640); err != nil {
-		t.Fatal(err)
+func TestTrAndBase64(t *testing.T) {
+	translated, err := Tr("abc", "ab", "xy", false)
+	if err != nil || translated != "xyc" {
+		t.Fatalf("unexpected tr result %q err=%v", translated, err)
 	}
-	if _, err := execute(t, "cp", []string{source, destination}, ""); err != nil {
-		t.Fatal(err)
+	deleted, err := Tr("abc", "b", "", true)
+	if err != nil || deleted != "ac" {
+		t.Fatalf("unexpected tr delete result %q err=%v", deleted, err)
 	}
-	data, err := os.ReadFile(destination)
-	if err != nil {
-		t.Fatal(err)
+
+	encoded := Base64Encode("hi")
+	decoded, err := Base64Decode(encoded)
+	if err != nil || decoded != "hi" {
+		t.Fatalf("round trip failed: %q err=%v", decoded, err)
 	}
-	if string(data) != "contents" {
-		t.Fatalf("copied contents = %q", data)
+	if _, err := Base64Decode("not base64!!"); err == nil {
+		t.Fatal("expected invalid base64 to be rejected")
 	}
-	if _, err := execute(t, "cp", []string{source, destination}, ""); err == nil {
-		t.Fatal("expected existing destination error")
-	}
-	if _, err := execute(t, "cp", []string{"-f", source, destination}, ""); err != nil {
-		t.Fatal(err)
+	if _, err := Base64Decode(Base64Encode(string([]byte{0xff, 0xfe}))); err == nil {
+		t.Fatal("expected non-UTF-8 decoded data to be rejected")
 	}
 }
 
-func TestDate(t *testing.T) {
-	original := timeNow
-	timeNow = func() time.Time { return time.Date(2026, time.August, 15, 19, 37, 14, 0, time.FixedZone("TEST", 3600)) }
-	t.Cleanup(func() { timeNow = original })
+func TestGrepLimitsMatches(t *testing.T) {
+	text := "TODO one\nTODO two\nTODO three\nother\n"
+	matches, truncated, err := Grep(text, GrepOptions{Pattern: "TODO", MaxMatches: 2})
+	if err != nil {
+		t.Fatalf("grep failed: %v", err)
+	}
+	if len(matches) != 2 || !truncated {
+		t.Fatalf("expected 2 truncated matches, got %d truncated=%t", len(matches), truncated)
+	}
+	if matches[0].Line != 1 || matches[0].Text != "TODO one" {
+		t.Fatalf("unexpected first match %+v", matches[0])
+	}
+	if _, _, err := Grep(text, GrepOptions{Pattern: "("}); err == nil {
+		t.Fatal("expected invalid pattern to be rejected")
+	}
+	matches, _, err = Grep(text, GrepOptions{Pattern: "todo", IgnoreCase: true, FixedText: true, MaxMatches: 20})
+	if err != nil || len(matches) != 3 {
+		t.Fatalf("unexpected fixed/ignore-case result %d err=%v", len(matches), err)
+	}
+}
 
-	output, err := execute(t, "date", []string{"+%F %T %Z"}, "")
-	if err != nil {
-		t.Fatal(err)
+func TestBasenameAndDirname(t *testing.T) {
+	if got := Basename("docs/README.md", ".md"); got != "README" {
+		t.Fatalf("unexpected basename %q", got)
 	}
-	if output != "2026-08-15 19:37:14 TEST\n" {
-		t.Fatalf("output = %q", output)
+	if got := Basename("docs/", ""); got != "docs" {
+		t.Fatalf("unexpected basename %q", got)
 	}
-	output, err = execute(t, "date", []string{"-u", "+%z"}, "")
-	if err != nil {
-		t.Fatal(err)
+	if got := Dirname("docs/README.md"); got != "docs" {
+		t.Fatalf("unexpected dirname %q", got)
 	}
-	if output != "+0000\n" {
-		t.Fatalf("output = %q", output)
+}
+
+func TestSha256Sum(t *testing.T) {
+	if got := Sha256Sum([]byte("abc")); got != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
+		t.Fatalf("unexpected digest %q", got)
 	}
 }

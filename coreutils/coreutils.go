@@ -1,45 +1,62 @@
-// Package coreutils provides small, composable implementations of common
-// Unix utilities.
+// Package coreutils provides small, bounded implementations of common Unix
+// utilities. Every helper works on in-memory data that the caller has already
+// limited, and every helper reports whether its result was truncated.
+//
+// The helpers never execute a shell and never touch the filesystem; path and
+// file access is the responsibility of the MCP server that uses them.
 package coreutils
 
-import (
-	"context"
-	"fmt"
-	"io"
-	"sort"
-)
+import "strings"
 
-// Command is a core utility that reads and writes streams.
-type Command struct {
-	Name        string
-	Description string
-	Run         func(context.Context, []string, io.Reader, io.Writer, io.Writer) error
+// MaxLineLength is the maximum number of bytes kept for a single line.
+const MaxLineLength = 2 << 10 // 2 KiB
+
+// SplitLines splits text into lines, dropping a single trailing newline.
+func SplitLines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	text = strings.TrimSuffix(text, "\n")
+	return strings.Split(text, "\n")
 }
 
-var commands = map[string]Command{}
-
-func register(command Command) {
-	if _, exists := commands[command.Name]; exists {
-		panic("duplicate coreutil: " + command.Name)
+// JoinLines joins lines with newlines, appending a trailing newline when the
+// result is not empty.
+func JoinLines(lines []string) string {
+	if len(lines) == 0 {
+		return ""
 	}
-	commands[command.Name] = command
+	return strings.Join(lines, "\n") + "\n"
 }
 
-// Commands returns all available commands, sorted by name.
-func Commands() []Command {
-	result := make([]Command, 0, len(commands))
-	for _, command := range commands {
-		result = append(result, command)
+// ClampLine truncates a single line to MaxLineLength bytes.
+func ClampLine(line string) (string, bool) {
+	if len(line) <= MaxLineLength {
+		return line, false
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
-	return result
+	return line[:MaxLineLength], true
 }
 
-// Run executes a named utility.
-func Run(ctx context.Context, name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	command, ok := commands[name]
-	if !ok {
-		return fmt.Errorf("unknown utility %q", name)
+// ClampLines truncates every line and reports whether any line was truncated.
+func ClampLines(lines []string) ([]string, bool) {
+	truncated := false
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		clamped, cut := ClampLine(line)
+		truncated = truncated || cut
+		out = append(out, clamped)
 	}
-	return command.Run(ctx, args, stdin, stdout, stderr)
+	return out, truncated
+}
+
+// Clamp truncates text to at most limit bytes and reports whether bytes were
+// dropped.
+func Clamp(text string, limit int) (string, bool) {
+	if limit < 0 {
+		limit = 0
+	}
+	if len(text) <= limit {
+		return text, false
+	}
+	return text[:limit], true
 }
