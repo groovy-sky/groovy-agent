@@ -19,6 +19,26 @@ LLAMA_N_GPU_LAYERS="${LLAMA_N_GPU_LAYERS:-0}"
 LLAMA_STARTUP_TIMEOUT="${LLAMA_STARTUP_TIMEOUT:-180}"
 LLAMA_EXTRA_ARGS="${LLAMA_EXTRA_ARGS:-}"
 
+# Sampling/generation guardrails. These defaults exist to prevent small
+# quantized models from spiraling into degenerate token repetition (e.g. an
+# assistant turn that repeats the same "Final Answer" paragraph until the
+# tool/time budget is exhausted, without ever issuing the required tool
+# call). They are applied unconditionally as llama-server startup flags, so
+# they take effect even for requests that do not set sampling params
+# themselves, and can still be overridden per-request by the client or
+# widened/replaced via LLAMA_EXTRA_ARGS below.
+#
+# - LLAMA_REPEAT_PENALTY: penalize sampling tokens that already appeared
+#   recently; the primary defense against repetition loops.
+# - LLAMA_REPEAT_LAST_N: how many recent tokens the repeat penalty considers.
+# - LLAMA_PREDICT_LIMIT: hard cap (in tokens) on a single generation, so a
+#   degenerate loop is cut off quickly instead of running for the entire
+#   request timeout. -1 (llama.cpp's "unbounded" default) is accepted to
+#   opt back out.
+LLAMA_REPEAT_PENALTY="${LLAMA_REPEAT_PENALTY:-1.3}"
+LLAMA_REPEAT_LAST_N="${LLAMA_REPEAT_LAST_N:-256}"
+LLAMA_PREDICT_LIMIT="${LLAMA_PREDICT_LIMIT:-1024}"
+
 if [[ ! -f "$LLAMA_MODEL_PATH" ]]; then
   echo "model file not found: $LLAMA_MODEL_PATH" >&2
   echo "set LLAMA_MODEL_PATH or mount /models with ${LLAMA_MODEL_FILE}" >&2
@@ -38,6 +58,9 @@ llama_args=(
   --ctx-size "$LLAMA_CTX_SIZE"
   --threads "$LLAMA_THREADS"
   --n-gpu-layers "$LLAMA_N_GPU_LAYERS"
+  --repeat-penalty "$LLAMA_REPEAT_PENALTY"
+  --repeat-last-n "$LLAMA_REPEAT_LAST_N"
+  --n-predict "$LLAMA_PREDICT_LIMIT"
 )
 
 if [[ -n "$LLAMA_EXTRA_ARGS" ]]; then
