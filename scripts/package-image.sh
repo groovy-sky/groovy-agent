@@ -16,7 +16,7 @@ build_args=(
 if [[ "$DOWNLOAD_MODEL_AT_BUILD" == "1" ]]; then
   build_args=(
     --build-arg DOWNLOAD_MODEL=1
-    --build-arg MODEL_URL="${MODEL_URL:-https://huggingface.co/unsloth/Qwen2.5-Coder-7B-Instruct-128K-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf}"
+    --build-arg MODEL_URL="${MODEL_URL:-https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf}"
     "${build_args[@]}"
   )
   if [[ -n "${HF_TOKEN:-}" ]]; then

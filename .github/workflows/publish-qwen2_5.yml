@@ -7,10 +7,11 @@ on:
     paths:
       - Dockerfile
       - docker/**
+      - cmd/**
       - coreutils/**
       - internal/**
+      - scripts/**
       - go.mod
-      - main.go
       - .github/workflows/publish-qwen2_5.yml
   workflow_dispatch:
 
@@ -40,7 +41,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push image with Qwen2.5-Coder-7B-Instruct-Q4_K_M
+      - name: Build and push image with Qwen2.5-1.5B-Instruct-Q4_K_M
         uses: docker/build-push-action@v6
         with:
           context: .

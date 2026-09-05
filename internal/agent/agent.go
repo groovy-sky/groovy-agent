@@ -74,6 +74,19 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.MCPCommand) == "" {
 		return errors.New("--mcp-command is required")
 	}
+	// The MCP child runs with the workspace as its working directory, so a
+	// relative command has to be resolved against the agent's directory first.
+	if strings.ContainsRune(c.MCPCommand, os.PathSeparator) {
+		command, err := filepath.Abs(c.MCPCommand)
+		if err != nil {
+			return errors.New("--mcp-command could not be resolved")
+		}
+		info, err := os.Stat(command)
+		if err != nil || info.IsDir() {
+			return fmt.Errorf("--mcp-command %q is not an executable file", c.MCPCommand)
+		}
+		c.MCPCommand = command
+	}
 	if strings.TrimSpace(c.Prompt) == "" {
 		return errors.New("a prompt argument is required")
 	}

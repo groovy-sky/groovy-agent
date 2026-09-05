@@ -757,3 +757,26 @@ go run ./cmd/agent \
   --workspace "$(pwd)" \
   "Show the workspace path and identify the likely README."
 ```
+
+---
+
+## Implementation Notes
+
+These notes record intentional decisions made while implementing this plan; the
+requirements above are unchanged.
+
+- The text-processing profile lists seven tools while the per-request limit is
+  six. The implementation exposes `sort`, `uniq`, `wc`, `cut`, `tr`, and
+  `base64`; `paste` is still implemented and remains reachable through other
+  requests, but it is not part of the six exposed text-processing tools.
+- The repository layout adds `internal/mcpserver` (coreutils MCP server),
+  `internal/mcpproto` (JSON-RPC/MCP message types), and `internal/jsonschema`
+  (strict schema-subset validator) alongside `internal/agent`, `internal/llm`,
+  and `internal/mcpclient`.
+- MCP is implemented directly as newline-delimited JSON-RPC 2.0 over stdio
+  rather than through a third-party dependency, keeping the module free of
+  external requirements.
+- `pwd` returns `/<workspace directory name>` as the logical workspace path and
+  `date` returns an RFC 3339 timestamp.
+- Write-capable tools are not implemented at all; the server never registers
+  them, so the policy cannot be bypassed by configuration.

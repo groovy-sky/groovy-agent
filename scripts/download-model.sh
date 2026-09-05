@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL_DIR="${MODEL_DIR:-${ROOT_DIR}/artifacts/models}"
-MODEL_FILENAME="${MODEL_FILENAME:-Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf}"
-MODEL_URL="${MODEL_URL:-https://huggingface.co/unsloth/Qwen2.5-Coder-7B-Instruct-128K-GGUF/resolve/main/${MODEL_FILENAME}}"
+MODEL_FILENAME="${MODEL_FILENAME:-qwen2.5-1.5b-instruct-q4_k_m.gguf}"
+MODEL_URL="${MODEL_URL:-https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/${MODEL_FILENAME}}"
 
 mkdir -p "$MODEL_DIR"
 tmp_file="${MODEL_DIR}/${MODEL_FILENAME}.part"

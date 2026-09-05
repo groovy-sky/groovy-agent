@@ -113,7 +113,7 @@ func TestRunFailsWhenLlamaServerIsUnreachable(t *testing.T) {
 	config := Config{
 		LlamaURL:   "http://127.0.0.1:1",
 		Model:      "local-qwen2.5",
-		MCPCommand: "/nonexistent/coreutils-mcp",
+		MCPCommand: buildCoreutilsMCP(t),
 		Workspace:  t.TempDir(),
 		Prompt:     "hello",
 	}
@@ -155,7 +155,7 @@ func TestRunCancellationLeavesNoChildProcess(t *testing.T) {
 	if err := <-done; err == nil {
 		t.Fatal("expected cancellation to abort the run")
 	}
-	if pgrepChildren(t, filepath.Base(binary)) {
+	if pgrepChildren(t, binary) {
 		t.Fatal("a coreutils-mcp child process survived cancellation")
 	}
 }

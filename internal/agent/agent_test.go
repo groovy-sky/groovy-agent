@@ -318,7 +318,11 @@ func TestPruneMessagesBoundsHistory(t *testing.T) {
 
 func TestConfigValidate(t *testing.T) {
 	workspace := t.TempDir()
-	base := Config{LlamaURL: "http://127.0.0.1:8080", Model: "local-qwen2.5", MCPCommand: "./bin/coreutils-mcp", Workspace: workspace, Prompt: "hi"}
+	command := filepath.Join(workspace, "coreutils-mcp")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("write command: %v", err)
+	}
+	base := Config{LlamaURL: "http://127.0.0.1:8080", Model: "local-qwen2.5", MCPCommand: command, Workspace: workspace, Prompt: "hi"}
 	valid := base
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("expected a valid configuration: %v", err)
@@ -343,5 +347,10 @@ func TestConfigValidate(t *testing.T) {
 	missingCommand.MCPCommand = ""
 	if err := missingCommand.Validate(); err == nil {
 		t.Fatal("expected a missing MCP command to be rejected")
+	}
+	unknownCommand := base
+	unknownCommand.MCPCommand = filepath.Join(workspace, "missing-mcp")
+	if err := unknownCommand.Validate(); err == nil {
+		t.Fatal("expected a missing MCP executable to be rejected")
 	}
 }

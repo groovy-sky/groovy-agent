@@ -5,17 +5,18 @@ WORKDIR /src
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 COPY go.mod ./
-COPY main.go ./
+COPY cmd ./cmd
 COPY coreutils ./coreutils
 COPY internal ./internal
-RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -trimpath -ldflags='-s -w' -o /out/groovy-agent .
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -trimpath -ldflags='-s -w' -o /out/agent ./cmd/agent \
+    && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -trimpath -ldflags='-s -w' -o /out/coreutils-mcp ./cmd/coreutils-mcp
 
 FROM ghcr.io/ggml-org/llama.cpp:server@sha256:092d1291f2bcf59ff727fa3af855fb9bd4759d6bff860f6fbfd5e3e377e12625 AS llama-runtime
 
 FROM debian:bookworm-slim AS model-fetch
 ARG DOWNLOAD_MODEL=0
-ARG MODEL_URL="https://huggingface.co/unsloth/Qwen2.5-Coder-7B-Instruct-128K-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
-ARG MODEL_FILENAME="Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
+ARG MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+ARG MODEL_FILENAME="qwen2.5-1.5b-instruct-q4_k_m.gguf"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
@@ -39,23 +40,26 @@ FROM llama-runtime AS runtime
 
 ENV LLAMA_SERVER_HOST=127.0.0.1 \
     LLAMA_SERVER_PORT=8080 \
-    LLAMA_MODEL_FILE=Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
-    LLAMA_MODEL_NAME=Qwen2.5-Coder-7B-Instruct-Q4_K_M \
-    LLAMA_CTX_SIZE=8192 \
+    LLAMA_MODEL_FILE=qwen2.5-1.5b-instruct-q4_k_m.gguf \
+    LLAMA_MODEL_NAME=local-qwen2.5 \
+    LLAMA_CTX_SIZE=4096 \
+    LLAMA_BATCH_SIZE=128 \
     LLAMA_THREADS=0 \
     LLAMA_N_GPU_LAYERS=0 \
     LLAMA_STARTUP_TIMEOUT=180 \
     LD_LIBRARY_PATH=/opt/llama \
-    AGENT_OUTPUT_DIR=/output
+    AGENT_WORKSPACE=/workspace
 
-COPY --from=go-builder /out/groovy-agent /usr/local/bin/groovy-agent
+COPY --from=go-builder /out/agent /usr/local/bin/agent
+COPY --from=go-builder /out/coreutils-mcp /usr/local/bin/coreutils-mcp
 COPY --from=llama-runtime /app /opt/llama
 COPY --from=model-fetch /models/ /models/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN test -x /opt/llama/llama-server \
     && chmod +x /usr/local/bin/entrypoint.sh \
-    && mkdir -p /output
+    && mkdir -p /workspace
 
-VOLUME /output
+WORKDIR /workspace
+VOLUME /workspace
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
