@@ -136,6 +136,24 @@ func TestFileReadIsBounded(t *testing.T) {
 	}
 }
 
+func TestTailReadsTheEndOfOversizedFiles(t *testing.T) {
+	workspace := t.TempDir()
+	content := strings.Repeat("filler line\n", 4000) + "final line\n"
+	if err := os.WriteFile(filepath.Join(workspace, "big.txt"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	server := newTestServer(t, workspace)
+
+	body := call(t, server, "tail", map[string]any{"path": "big.txt", "lines": 2})
+	output, _ := body["output"].(string)
+	if !strings.Contains(output, "final line") {
+		t.Fatalf("tail did not return the end of the file: %q", output)
+	}
+	if body["truncated"] != true {
+		t.Fatalf("expected truncation to be reported, got %v", body)
+	}
+}
+
 func TestGrepIsBounded(t *testing.T) {
 	workspace := t.TempDir()
 	content := strings.Repeat("TODO item\n", 50)

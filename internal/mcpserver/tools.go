@@ -304,7 +304,7 @@ func runTail(_ context.Context, s *Server, arguments map[string]any) (payload, e
 		return payload{}, err
 	}
 	count := optionalInt(arguments, "lines", 20)
-	content, truncated, err := s.readFile(path, s.limits.MaxFileReadBytes)
+	content, truncated, err := s.readFileTail(path, s.limits.MaxFileReadBytes)
 	if err != nil {
 		return payload{}, err
 	}

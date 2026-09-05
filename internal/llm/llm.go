@@ -109,7 +109,7 @@ func (c *Client) Ping(ctx context.Context) error {
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		_ = response.Body.Close()
-		if response.StatusCode < http.StatusInternalServerError {
+		if response.StatusCode >= 200 && response.StatusCode < 300 {
 			return nil
 		}
 		lastErr = fmt.Errorf("llama-server responded with status %d", response.StatusCode)

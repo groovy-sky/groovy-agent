@@ -84,32 +84,12 @@ func (s *Server) relativePath(path string) string {
 
 // readFile reads at most limit bytes from a regular workspace file.
 func (s *Server) readFile(relative string, limit int) (string, bool, error) {
-	path, err := s.resolvePath(relative)
+	file, _, limit, err := s.openRegularFile(relative, limit)
 	if err != nil {
 		return "", false, err
 	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", false, fail(mcpproto.ErrorToolError, "file could not be inspected")
-	}
-	if info.IsDir() {
-		return "", false, fail(mcpproto.ErrorInvalidArguments, "path is a directory, not a file")
-	}
-	if !info.Mode().IsRegular() {
-		return "", false, fail(mcpproto.ErrorInvalidArguments, "path is not a regular file")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		if os.IsPermission(err) {
-			return "", false, fail(mcpproto.ErrorPermissionDenied, "file is not readable")
-		}
-		return "", false, fail(mcpproto.ErrorToolError, "file could not be opened")
-	}
 	defer file.Close()
 
-	if limit <= 0 || limit > s.limits.MaxFileReadBytes {
-		limit = s.limits.MaxFileReadBytes
-	}
 	buffer := make([]byte, limit+1)
 	count, err := io.ReadFull(file, buffer)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
@@ -121,6 +101,61 @@ func (s *Server) readFile(relative string, limit int) (string, bool, error) {
 		truncated = true
 	}
 	return string(buffer[:count]), truncated, nil
+}
+
+// readFileTail reads the trailing window of a file so that tail reports the
+// real end of oversized files instead of the middle.
+func (s *Server) readFileTail(relative string, limit int) (string, bool, error) {
+	file, info, limit, err := s.openRegularFile(relative, limit)
+	if err != nil {
+		return "", false, err
+	}
+	defer file.Close()
+
+	size := info.Size()
+	truncated := false
+	if size > int64(limit) {
+		if _, err := file.Seek(size-int64(limit), io.SeekStart); err != nil {
+			return "", false, fail(mcpproto.ErrorToolError, "file could not be read")
+		}
+		truncated = true
+	}
+	buffer := make([]byte, limit)
+	count, err := io.ReadFull(file, buffer)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return "", false, fail(mcpproto.ErrorToolError, "file could not be read")
+	}
+	return string(buffer[:count]), truncated, nil
+}
+
+// openRegularFile resolves a workspace relative path, rejects anything that is
+// not a readable regular file, and clamps the requested read limit.
+func (s *Server) openRegularFile(relative string, limit int) (*os.File, os.FileInfo, int, error) {
+	path, err := s.resolvePath(relative)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, 0, fail(mcpproto.ErrorToolError, "file could not be inspected")
+	}
+	if info.IsDir() {
+		return nil, nil, 0, fail(mcpproto.ErrorInvalidArguments, "path is a directory, not a file")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, 0, fail(mcpproto.ErrorInvalidArguments, "path is not a regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsPermission(err) {
+			return nil, nil, 0, fail(mcpproto.ErrorPermissionDenied, "file is not readable")
+		}
+		return nil, nil, 0, fail(mcpproto.ErrorToolError, "file could not be opened")
+	}
+	if limit <= 0 || limit > s.limits.MaxFileReadBytes {
+		limit = s.limits.MaxFileReadBytes
+	}
+	return file, info, limit, nil
 }
 
 // requireText extracts a bounded text argument.

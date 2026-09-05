@@ -157,7 +157,7 @@ func equal(left, right any) bool {
 	if leftOK && rightOK {
 		return leftNumber == rightNumber
 	}
-	if !comparable(left) || !comparable(right) {
+	if !isComparable(left) || !isComparable(right) {
 		// Objects and arrays are never enum members in the supported subset,
 		// and comparing them directly would panic.
 		return false
@@ -165,8 +165,8 @@ func equal(left, right any) bool {
 	return left == right
 }
 
-// comparable reports whether a decoded JSON value can be compared with ==.
-func comparable(value any) bool {
+// isComparable reports whether a decoded JSON value can be compared with ==.
+func isComparable(value any) bool {
 	switch value.(type) {
 	case nil, bool, string, float64, int, json.Number:
 		return true

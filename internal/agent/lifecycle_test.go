@@ -184,7 +184,7 @@ func TestRunCancellationLeavesNoChildProcess(t *testing.T) {
 func pgrepChildren(t *testing.T, name string) bool {
 	t.Helper()
 	if _, err := exec.LookPath("pgrep"); err != nil {
-		return false
+		t.Skip("pgrep is unavailable, cannot verify child process cleanup")
 	}
 	output, err := exec.Command("pgrep", "-f", name).Output()
 	if err != nil {
