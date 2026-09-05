@@ -243,6 +243,32 @@ func TestServeHandlesLifecycleOverStdio(t *testing.T) {
 	}
 }
 
+func TestToolMethodsRequireInitialization(t *testing.T) {
+	server := newTestServer(t, t.TempDir())
+	input := strings.NewReader(strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"pwd","arguments":{}}}`,
+		"",
+	}, "\n"))
+	output := &strings.Builder{}
+	if err := server.Serve(context.Background(), input, output); err != nil {
+		t.Fatalf("Serve failed: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 responses, got %d: %s", len(lines), output.String())
+	}
+	for _, line := range lines {
+		message := mcpproto.Message{}
+		if err := json.Unmarshal([]byte(line), &message); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if message.Error == nil || message.Error.Code != mcpproto.CodeInvalidRequest {
+			t.Fatalf("expected an invalid request error before initialization, got %s", line)
+		}
+	}
+}
+
 func TestNewRejectsMissingWorkspace(t *testing.T) {
 	if _, err := New(filepath.Join(t.TempDir(), "missing"), DefaultLimits(), nil); err == nil {
 		t.Fatal("expected a missing workspace to be rejected")

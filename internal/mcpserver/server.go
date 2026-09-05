@@ -152,9 +152,19 @@ func (s *Server) dispatch(ctx context.Context, output io.Writer, request mcpprot
 	case "ping":
 		s.respondResult(output, request.ID, map[string]any{})
 	case "tools/list":
+		if !s.initialized {
+			if !isNotification {
+				s.respondError(output, request.ID, mcpproto.CodeInvalidRequest, "server is not initialized")
+			}
+			return
+		}
 		s.respondResult(output, request.ID, s.listTools())
 	case "tools/call":
 		if isNotification {
+			return
+		}
+		if !s.initialized {
+			s.respondError(output, request.ID, mcpproto.CodeInvalidRequest, "server is not initialized")
 			return
 		}
 		s.respondResult(output, request.ID, s.callTool(ctx, request.Params))

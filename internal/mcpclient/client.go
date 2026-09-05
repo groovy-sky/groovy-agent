@@ -28,6 +28,7 @@ type Client struct {
 
 	messages chan *mcpproto.Message
 	readErr  chan error
+	done     chan struct{}
 
 	mutex     sync.Mutex
 	nextID    int
@@ -43,6 +44,7 @@ func New(reader io.ReadCloser, writer io.WriteCloser, stop func()) *Client {
 		stop:     stop,
 		messages: make(chan *mcpproto.Message, 8),
 		readErr:  make(chan error, 1),
+		done:     make(chan struct{}),
 	}
 	go client.readLoop()
 	return client
@@ -104,7 +106,11 @@ func (c *Client) readLoop() {
 			close(c.messages)
 			return
 		}
-		c.messages <- message
+		select {
+		case c.messages <- message:
+		case <-c.done:
+			return
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		c.readErr <- err
@@ -247,6 +253,7 @@ func (c *Client) CallTool(ctx context.Context, name string, arguments json.RawMe
 // child process does not survive the agent.
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
+		close(c.done)
 		_ = c.writer.Close()
 		if c.stop != nil {
 			c.stop()

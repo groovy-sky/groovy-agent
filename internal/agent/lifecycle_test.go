@@ -11,8 +11,28 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
+
+// syncBuffer collects diagnostics written concurrently by the agent and by the
+// child process stderr forwarder.
+type syncBuffer struct {
+	mutex   sync.Mutex
+	builder strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return b.builder.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return b.builder.String()
+}
 
 // buildCoreutilsMCP builds the MCP server executable used by the end-to-end
 // lifecycle test.
@@ -87,7 +107,7 @@ func TestRunEndToEndWithChildProcess(t *testing.T) {
 	defer server.Close()
 
 	stdout := &strings.Builder{}
-	stderr := &strings.Builder{}
+	stderr := &syncBuffer{}
 	config := Config{
 		LlamaURL:   server.URL,
 		Model:      "local-qwen2.5",

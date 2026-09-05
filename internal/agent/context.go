@@ -6,7 +6,8 @@ import (
 	"github.com/groovy-sky/groovy-agent/internal/llm"
 )
 
-// maxResultTokensPerMessage bounds a single tool result kept in history.
+// maxToolResultBytes bounds the number of bytes of a single tool result kept in
+// history.
 const maxToolResultBytes = 4 << 10
 
 // estimateTokens is a deliberately conservative character based estimate. The
