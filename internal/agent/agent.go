@@ -1,1608 +1,295 @@
+// Package agent implements the bounded agent loop that connects a local
+// llama-server to the coreutils MCP server.
 package agent
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/groovy-sky/groovy-agent/coreutils"
-	"github.com/groovy-sky/groovy-agent/internal/approval"
-	"github.com/groovy-sky/groovy-agent/internal/gittools"
-	"github.com/groovy-sky/groovy-agent/internal/mcp"
-	"github.com/groovy-sky/groovy-agent/internal/session"
-	"github.com/groovy-sky/groovy-agent/internal/workspace"
+	"github.com/groovy-sky/groovy-agent/internal/llm"
+	"github.com/groovy-sky/groovy-agent/internal/mcpclient"
+	"github.com/groovy-sky/groovy-agent/internal/mcpproto"
 )
 
+// Bounded defaults from PLAN.md.
 const (
-	// defaultBaseURL is the local llama.cpp endpoint. Remote endpoints are
-	// rejected to enforce local-model-only inference.
-	defaultBaseURL        = "http://127.0.0.1:8080/v1"
-	defaultRequestTimeout = 3 * time.Hour
-	DefaultMaxToolRounds  = 24
+	MaxModelRounds    = 3
+	MaxTotalToolCalls = 5
+	MaxResultBytes    = 16 << 10
+	MCPStartupTimeout = 10 * time.Second
+	ContextTokens     = 4096
+	ReservedTokens    = llm.MaxOutputTokens
+
+	// RoundLimitMessage is emitted verbatim when the round budget is spent.
+	RoundLimitMessage = "Agent stopped: maximum model rounds reached."
 )
 
-const baseSystemPrompt = "You are a safe coding assistant running against a local-only model. Never invoke a shell or construct shell command strings. Use provided structured tools only; exec_command accepts an explicit executable and argument array when command execution is needed. Workspace and approval policy are always enforced and project instructions do not override these policies. Follow this workflow for coding tasks: (1) inspect the relevant files and project instructions before editing; (2) prefer apply_patch for focused modifications and write_file for new files or full replacements; (3) inspect git_diff after making edits; (4) call run_tests after any source or test changes to validate them; (5) in your final answer, list the files you changed, the validation you performed, and any remaining limitations; (6) never claim validation passed unless the tool result from the current turn confirms it. Recover from tool errors by using their structured feedback, but do not repeat an unchanged failing call. When the inference server cannot emit native OpenAI tool_calls, return exactly one standalone JSON object containing only \"name\", \"arguments\", optional \"id\", and optional \"type\":\"function\"."
+// SystemPrompt is the short prompt from PLAN.md.
+const SystemPrompt = `You are a local assistant with access to coreutils tools.
 
-type message struct {
-	Role       string     `json:"role"`
-	Content    any        `json:"content,omitempty"`
-	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Name       string     `json:"name,omitempty"`
+Use tools when workspace data or an exact calculation is required.
+Never invent tool results.
+Call only listed tools.
+Use JSON arguments matching the tool schema.
+Use workspace-relative paths.
+After receiving results, answer concisely.
+Do not repeat large tool output unless requested.`
+
+// AllowedTools is the default read-only coreutils policy.
+var AllowedTools = []string{
+	"base64", "basename", "cat", "cut", "date", "dirname", "grep", "head",
+	"paste", "pwd", "sha256sum", "sort", "tail", "tr", "uniq", "wc",
 }
 
-type toolCall struct {
-	ID       string       `json:"id"`
-	Type     string       `json:"type"`
-	Function toolFunction `json:"function"`
+// Config holds the validated CLI configuration.
+type Config struct {
+	LlamaURL   string
+	Model      string
+	MCPCommand string
+	MCPArgs    []string
+	Workspace  string
+	Prompt     string
 }
 
-type toolFunction struct {
-	Name      string `json:"name"`
-	Arguments any    `json:"arguments"`
-}
-
-type toolDefinition struct {
-	Type     string   `json:"type"`
-	Function toolSpec `json:"function"`
-}
-
-type toolSpec struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Parameters  map[string]any `json:"parameters"`
-}
-
-type chatRequest struct {
-	Model      string           `json:"model"`
-	Messages   []message        `json:"messages"`
-	Tools      []toolDefinition `json:"tools,omitempty"`
-	ToolChoice any              `json:"tool_choice,omitempty"`
-}
-
-type chatResponse struct {
-	Choices []struct {
-		Message message `json:"message"`
-	} `json:"choices"`
-	Error *struct {
-		Message string `json:"message"`
-	} `json:"error,omitempty"`
-}
-
-type chatClient interface {
-	Complete(context.Context, []message, []toolDefinition, chatCompleteOptions) (message, error)
-}
-
-type chatCompleteOptions struct {
-	ToolChoice any
-}
-
-type apiClient struct {
-	httpClient *http.Client
-	apiKey     string
-	model      string
-	baseURL    string
-}
-
-var (
-	supportedUtilitiesOnce sync.Once
-	supportedUtilityNames  []string
-	supportedUtilitySet    map[string]struct{}
-)
-
-const DefaultOutputDir = "output"
-
-type Options struct {
-	WorkspacePath string
-	PlanMode      bool
-	Yolo          bool
-	ResumeID      string
-	RequireWrite  []string
-	MaxToolRounds int
-	// OutputDir is the directory where headless run results are persisted as
-	// JSON files. It is created automatically when the agent writes output.
-	// Defaults to DefaultOutputDir ("output") when empty.
-	OutputDir string
-}
-
-type RunResult struct {
-	SessionID string      `json:"session_id"`
-	Answer    string      `json:"answer"`
-	Events    []ToolEvent `json:"events,omitempty"`
-}
-
-type ToolEvent struct {
-	Tool         string `json:"tool"`
-	Path         string `json:"path,omitempty"`
-	Bytes        int64  `json:"bytes,omitempty"`
-	Approved     *bool  `json:"approved,omitempty"`
-	DeniedCode   string `json:"denied_code,omitempty"`
-	DeniedReason string `json:"denied_reason,omitempty"`
-	Success      bool   `json:"success"`
-}
-
-type toolRuntime struct {
-	workspace *workspace.Workspace
-	policy    approval.Policy
-	prompt    func(preview string) (bool, error)
-	events    *[]ToolEvent
-}
-
-// toolDispatcher routes model tool calls to an implementation.
-type toolDispatcher interface {
-	Execute(ctx context.Context, call toolCall) string
-}
-
-// Execute makes toolRuntime implement toolDispatcher for unit tests that
-// bypass the MCP transport.
-func (runtime *toolRuntime) Execute(ctx context.Context, call toolCall) string {
-	return executeToolCallWithRuntime(ctx, runtime, call)
-}
-
-// mcpClient is a JSON-RPC 2.0 MCP client that communicates over a pair of
-// io pipes connecting to an in-process MCP server goroutine.
-type mcpClient struct {
-	enc *json.Encoder
-	dec *json.Decoder
-	mu  sync.Mutex
-	id  int
-}
-
-func newMCPClient(r io.Reader, w io.Writer) *mcpClient {
-	return &mcpClient{enc: json.NewEncoder(w), dec: json.NewDecoder(r)}
-}
-
-// rpcCall sends a JSON-RPC request and returns the result.
-func (c *mcpClient) rpcCall(method string, params any) (json.RawMessage, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.id++
-	type req struct {
-		JSONRPC string `json:"jsonrpc"`
-		ID      int    `json:"id"`
-		Method  string `json:"method"`
-		Params  any    `json:"params,omitempty"`
+// Validate checks the configuration and canonicalizes the workspace.
+func (c *Config) Validate() error {
+	if strings.TrimSpace(c.LlamaURL) == "" {
+		return errors.New("--llama-url is required")
 	}
-	if err := c.enc.Encode(req{JSONRPC: "2.0", ID: c.id, Method: method, Params: params}); err != nil {
-		return nil, fmt.Errorf("MCP send %s: %w", method, err)
+	if !strings.HasPrefix(c.LlamaURL, "http://") && !strings.HasPrefix(c.LlamaURL, "https://") {
+		return errors.New("--llama-url must be an http or https URL")
 	}
-	var resp struct {
-		Result json.RawMessage `json:"result"`
-		Error  *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
+	if strings.TrimSpace(c.Model) == "" {
+		return errors.New("--model is required")
 	}
-	if err := c.dec.Decode(&resp); err != nil {
-		return nil, fmt.Errorf("MCP recv %s: %w", method, err)
+	if strings.TrimSpace(c.MCPCommand) == "" {
+		return errors.New("--mcp-command is required")
 	}
-	if resp.Error != nil {
-		return nil, fmt.Errorf("MCP error %d: %s", resp.Error.Code, resp.Error.Message)
+	if strings.TrimSpace(c.Prompt) == "" {
+		return errors.New("a prompt argument is required")
 	}
-	return resp.Result, nil
-}
-
-// rpcNotify sends a JSON-RPC notification (no response expected).
-func (c *mcpClient) rpcNotify(method string, params any) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	type notif struct {
-		JSONRPC string `json:"jsonrpc"`
-		Method  string `json:"method"`
-		Params  any    `json:"params,omitempty"`
+	if strings.TrimSpace(c.Workspace) == "" {
+		c.Workspace = "."
 	}
-	return c.enc.Encode(notif{JSONRPC: "2.0", Method: method, Params: params})
-}
-
-func (c *mcpClient) initialize() error {
-	_, err := c.rpcCall("initialize", map[string]any{
-		"protocolVersion": "2025-06-18",
-		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "groovy-agent", "version": "0.1.0"},
-	})
+	workspace, err := filepath.Abs(c.Workspace)
 	if err != nil {
-		return err
+		return errors.New("--workspace could not be resolved")
 	}
-	return c.rpcNotify("notifications/initialized", nil)
-}
-
-func (c *mcpClient) listTools() ([]toolDefinition, error) {
-	result, err := c.rpcCall("tools/list", nil)
+	workspace, err = filepath.EvalSymlinks(workspace)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("--workspace is not usable: %w", err)
 	}
-	var resp struct {
-		Tools []struct {
-			Name        string         `json:"name"`
-			Description string         `json:"description"`
-			InputSchema map[string]any `json:"inputSchema"`
-		} `json:"tools"`
+	info, err := os.Stat(workspace)
+	if err != nil || !info.IsDir() {
+		return errors.New("--workspace must be an existing directory")
 	}
-	if err := json.Unmarshal(result, &resp); err != nil {
-		return nil, fmt.Errorf("parse tools/list: %w", err)
-	}
-	tools := make([]toolDefinition, 0, len(resp.Tools))
-	for _, t := range resp.Tools {
-		tools = append(tools, functionTool(t.Name, t.Description, t.InputSchema))
-	}
-	return tools, nil
-}
-
-func (c *mcpClient) callTool(_ context.Context, name string, args any) (string, error) {
-	// Normalise args to json.RawMessage.
-	var argsRaw json.RawMessage
-	switch v := args.(type) {
-	case string:
-		if v == "" {
-			argsRaw = json.RawMessage("{}")
-		} else {
-			argsRaw = json.RawMessage(v)
-		}
-	case nil:
-		argsRaw = json.RawMessage("{}")
-	default:
-		data, err := json.Marshal(v)
-		if err != nil {
-			return "", err
-		}
-		argsRaw = data
-	}
-	result, err := c.rpcCall("tools/call", map[string]any{
-		"name":      name,
-		"arguments": argsRaw,
-	})
-	if err != nil {
-		return "", err
-	}
-	var resp struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(result, &resp); err != nil {
-		return "", fmt.Errorf("parse tools/call: %w", err)
-	}
-	var parts []string
-	for _, c := range resp.Content {
-		if c.Type == "text" {
-			parts = append(parts, c.Text)
-		}
-	}
-	return strings.Join(parts, ""), nil
-}
-
-// mcpDispatcher routes model tool calls through the in-process MCP client.
-type mcpDispatcher struct {
-	client *mcpClient
-}
-
-func (d *mcpDispatcher) Execute(ctx context.Context, call toolCall) string {
-	output, err := d.client.callTool(ctx, call.Function.Name, call.Function.Arguments)
-	if err != nil {
-		result := toolResult{Success: false, Error: fmt.Sprintf("MCP tool call failed: %v", err)}
-		return marshalToolResult(result)
-	}
-	return output
-}
-
-type eventDispatcher struct {
-	base      toolDispatcher
-	workspace *workspace.Workspace
-	events    *[]ToolEvent
-}
-
-func (dispatcher *eventDispatcher) Execute(ctx context.Context, call toolCall) string {
-	output := dispatcher.base.Execute(ctx, call)
-	recordEvent(dispatcher.events, buildToolEvent(dispatcher.workspace, call, output))
-	return output
-}
-
-// startInProcessMCP starts an MCP server goroutine connected via in-process
-// pipes. It returns the client (already initialized) and a stop function.
-// The server shuts down when stop is called or ctx is cancelled.
-func startInProcessMCP(ctx context.Context, cfg mcp.Config) (*mcpClient, func(), error) {
-	serverInR, serverInW := io.Pipe()
-	serverOutR, serverOutW := io.Pipe()
-
-	srvCtx, cancel := context.WithCancel(ctx)
-	go func() {
-		defer serverOutW.Close()
-		_ = mcp.ServeWithConfig(srvCtx, serverInR, serverOutW, cfg)
-	}()
-
-	client := newMCPClient(serverOutR, serverInW)
-	stop := func() {
-		cancel()
-		_ = serverInW.Close()
-	}
-	if err := client.initialize(); err != nil {
-		stop()
-		return nil, nil, fmt.Errorf("MCP initialize: %w", err)
-	}
-	return client, stop, nil
-}
-
-type interactiveState struct {
-	sessionID string
-	createdAt time.Time
-	messages  []message
-}
-
-// Run starts interactive terminal agent mode.
-func Run(ctx context.Context, input io.Reader, output, errOutput io.Writer, options Options) error {
-	chatClient, err := clientFromEnv()
-	if err != nil {
-		return err
-	}
-	workspaceRoot := options.WorkspacePath
-	if strings.TrimSpace(workspaceRoot) == "" {
-		workspaceRoot, err = os.Getwd()
-		if err != nil {
-			return err
-		}
-	}
-	ws, err := workspace.New(workspaceRoot, workspace.DefaultLimits())
-	if err != nil {
-		return err
-	}
-	requiredWrites, err := normalizeRequiredWrites(ws, options.RequireWrite)
-	if err != nil {
-		return err
-	}
-	store := session.NewStore(ws.Root)
-	instructionText, instructionSources, err := store.LoadProjectInstructions()
-	if err != nil {
-		return err
-	}
-	baseMessages := []message{{Role: "system", Content: buildSystemPrompt(instructionText, instructionSources)}}
-
-	state := interactiveState{sessionID: session.NewSessionID(time.Now()), createdAt: time.Now(), messages: baseMessages}
-	if strings.TrimSpace(options.ResumeID) != "" {
-		loaded, loadedAt, loadErr := loadSessionMessages(store, options.ResumeID)
-		if loadErr != nil {
-			return loadErr
-		}
-		state.sessionID = options.ResumeID
-		state.createdAt = loadedAt
-		state.messages = loaded
-	}
-
-	lineReader := newLineReader(input)
-	policy := approval.Policy{PlanMode: options.PlanMode, Yolo: options.Yolo, Interactive: true}
-
-	promptFn := func(preview string) (bool, error) {
-		if strings.TrimSpace(preview) != "" {
-			fmt.Fprintln(output, preview)
-		}
-		answer, promptErr := lineReader.ReadLine("Approve mutation? [y/N]: ", output)
-		if promptErr != nil {
-			return false, promptErr
-		}
-		answer = strings.ToLower(strings.TrimSpace(answer))
-		return answer == "y" || answer == "yes", nil
-	}
-
-	// Start the in-process MCP server once before the loop.
-	// Config.Policy is a pointer so plan-mode changes made via /plan take effect
-	// immediately without restarting the server.
-	mcpCfg := mcp.Config{
-		Workspace: ws,
-		Policy:    &policy,
-		Prompt:    promptFn,
-	}
-	mcpCli, stopMCP, mcpErr := startInProcessMCP(ctx, mcpCfg)
-	if mcpErr != nil {
-		return fmt.Errorf("MCP start error: %w", mcpErr)
-	}
-	defer stopMCP()
-	tools, mcpErr := mcpCli.listTools()
-	if mcpErr != nil {
-		return fmt.Errorf("MCP list tools error: %w", mcpErr)
-	}
-	dispatcher := &mcpDispatcher{client: mcpCli}
-
-	fmt.Fprintln(output, "groovy-agent agent mode. Type 'exit' to quit. Use /help for commands.")
-	for {
-		line, readErr := lineReader.ReadLine("", output)
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				return nil
-			}
-			return readErr
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if line == "exit" || line == "quit" {
-			return nil
-		}
-		if strings.HasPrefix(line, "/") {
-			handled, cmdErr := handleSlashCommand(line, &state, baseMessages, &policy, ws, store, output)
-			if cmdErr != nil {
-				fmt.Fprintf(errOutput, "command error: %v\n", cmdErr)
-			}
-			if handled {
-				continue
-			}
-		}
-
-		turn := append(append([]message{}, state.messages...), message{Role: "user", Content: line})
-		events := make([]ToolEvent, 0)
-		recordingDispatcher := &eventDispatcher{base: dispatcher, workspace: ws, events: &events}
-		updated, assistantAnswer, turnErr := completeTurnWithModerator(ctx, chatClient, turn, tools, recordingDispatcher, ws, requiredWrites, &events, options.MaxToolRounds)
-		if turnErr != nil {
-			if len(updated) > 0 {
-				state.messages = updated
-				_ = storeSnapshot(store, state.sessionID, state.createdAt, state.messages)
-			}
-			fmt.Fprintf(errOutput, "agent error: %v\n", turnErr)
-			continue
-		}
-		state.messages = updated
-		_ = storeSnapshot(store, state.sessionID, state.createdAt, state.messages)
-		fmt.Fprintln(output, assistantAnswer)
-	}
-}
-
-func RunHeadless(ctx context.Context, prompt string, options Options) (RunResult, error) {
-	if strings.TrimSpace(prompt) == "" {
-		return RunResult{}, errors.New("prompt is required")
-	}
-	chatClient, err := clientFromEnv()
-	if err != nil {
-		return RunResult{}, err
-	}
-	ws, err := workspace.New(options.WorkspacePath, workspace.DefaultLimits())
-	if err != nil {
-		return RunResult{}, err
-	}
-	requiredWrites, err := normalizeRequiredWrites(ws, options.RequireWrite)
-	if err != nil {
-		return RunResult{}, err
-	}
-	store := session.NewStore(ws.Root)
-	instructionText, instructionSources, err := store.LoadProjectInstructions()
-	if err != nil {
-		return RunResult{}, err
-	}
-	messages := []message{{Role: "system", Content: buildSystemPrompt(instructionText, instructionSources)}}
-	sessionID := session.NewSessionID(time.Now())
-	createdAt := time.Now()
-	if strings.TrimSpace(options.ResumeID) != "" {
-		loaded, loadedAt, loadErr := loadSessionMessages(store, options.ResumeID)
-		if loadErr != nil {
-			return RunResult{}, loadErr
-		}
-		sessionID = options.ResumeID
-		createdAt = loadedAt
-		messages = loaded
-	}
-	turn := append(messages, message{Role: "user", Content: prompt})
-	events := make([]ToolEvent, 0)
-	policy := approval.Policy{PlanMode: options.PlanMode, Yolo: options.Yolo, Interactive: false}
-	mcpCfg := mcp.Config{
-		Workspace: ws,
-		Policy:    &policy,
-	}
-	mcpCli, stopMCP, mcpErr := startInProcessMCP(ctx, mcpCfg)
-	if mcpErr != nil {
-		return RunResult{SessionID: sessionID, Events: events}, mcpErr
-	}
-	defer stopMCP()
-	tools, mcpErr := mcpCli.listTools()
-	if mcpErr != nil {
-		return RunResult{SessionID: sessionID, Events: events}, mcpErr
-	}
-	dispatcher := &eventDispatcher{base: &mcpDispatcher{client: mcpCli}, workspace: ws, events: &events}
-	updated, answer, err := completeTurnWithModerator(ctx, chatClient, turn, tools, dispatcher, ws, requiredWrites, &events, options.MaxToolRounds)
-	if err != nil {
-		result := RunResult{SessionID: sessionID, Answer: answer, Events: events}
-		if len(updated) > 0 {
-			_ = storeSnapshot(store, sessionID, createdAt, updated)
-			_ = persistResult(options.OutputDir, sessionID, result)
-		}
-		return result, err
-	}
-	for _, event := range events {
-		if event.DeniedCode == "approval_required_non_interactive" || event.DeniedCode == "plan_mode_denied" || event.DeniedCode == "approval_denied" {
-			_ = storeSnapshot(store, sessionID, createdAt, updated)
-			deniedResult := RunResult{SessionID: sessionID, Answer: answer, Events: events}
-			_ = persistResult(options.OutputDir, sessionID, deniedResult)
-			return deniedResult, errors.New(event.DeniedCode)
-		}
-	}
-	_ = storeSnapshot(store, sessionID, createdAt, updated)
-	result := RunResult{SessionID: sessionID, Answer: answer, Events: events}
-	_ = persistResult(options.OutputDir, sessionID, result)
-	return result, nil
-}
-
-// persistResult writes a JSON file for result into outputDir, creating the
-// directory automatically. Errors are non-fatal so that a missing or
-// unwritable output directory never prevents the agent from returning its
-// answer.
-func persistResult(outputDir, sessionID string, result RunResult) error {
-	if outputDir == "" {
-		outputDir = DefaultOutputDir
-	}
-	if err := os.MkdirAll(outputDir, 0o700); err != nil {
-		return fmt.Errorf("create output directory: %w", err)
-	}
-	path := filepath.Join(outputDir, sessionID+".json")
-	data, err := json.Marshal(result)
-	if err != nil {
-		return fmt.Errorf("marshal result: %w", err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write result file: %w", err)
-	}
+	c.Workspace = workspace
 	return nil
 }
 
-func handleSlashCommand(command string, state *interactiveState, baseMessages []message, policy *approval.Policy, ws *workspace.Workspace, store *session.Store, output io.Writer) (bool, error) {
-	fields := strings.Fields(command)
-	switch fields[0] {
-	case "/help":
-		fmt.Fprintln(output, "/help /status /diff /plan /clear /session /resume <id>")
-		return true, nil
-	case "/status":
-		fmt.Fprintf(output, "workspace=%s plan=%v yolo=%v session=%s\n", ws.Root, policy.PlanMode, policy.Yolo, state.sessionID)
-		return true, nil
-	case "/diff":
-		diff, err := gittools.Diff(ws.Root, ws.Limits.MaxOutputBytes)
-		if err != nil {
-			return true, err
-		}
-		if strings.TrimSpace(diff) == "" {
-			diff = "(no diff)"
-		}
-		fmt.Fprintln(output, diff)
-		return true, nil
-	case "/plan":
-		policy.PlanMode = !policy.PlanMode
-		fmt.Fprintf(output, "plan mode now %v\n", policy.PlanMode)
-		return true, nil
-	case "/clear":
-		state.messages = append([]message{}, baseMessages...)
-		_ = storeSnapshot(store, state.sessionID, state.createdAt, state.messages)
-		fmt.Fprintln(output, "conversation cleared")
-		return true, nil
-	case "/session":
-		fmt.Fprintf(output, "session=%s\n", state.sessionID)
-		return true, nil
-	case "/resume":
-		if len(fields) < 2 {
-			return true, errors.New("usage: /resume <session-id>")
-		}
-		loaded, loadedAt, err := loadSessionMessages(store, fields[1])
-		if err != nil {
-			return true, err
-		}
-		state.sessionID = fields[1]
-		state.createdAt = loadedAt
-		state.messages = loaded
-		fmt.Fprintf(output, "resumed %s\n", fields[1])
-		return true, nil
-	default:
-		return false, nil
-	}
+// Session owns the model client, the MCP session, and the discovered tools.
+type Session struct {
+	config     Config
+	model      modelClient
+	mcp        toolClient
+	discovered map[string]mcpproto.Tool
+	logger     *log.Logger
+	out        io.Writer
+	toolCalls  int
 }
 
-type lineReader struct {
-	reader *bufio.Reader
-	mu     sync.Mutex
+// modelClient is the subset of the LLM client used by the loop.
+type modelClient interface {
+	Complete(ctx context.Context, messages []llm.Message, tools []llm.Tool) (llm.Message, error)
 }
 
-func newLineReader(input io.Reader) *lineReader {
-	return &lineReader{reader: bufio.NewReader(input)}
+// toolClient is the subset of the MCP client used by the loop.
+type toolClient interface {
+	CallTool(ctx context.Context, name string, arguments json.RawMessage) (mcpproto.CallToolResult, error)
 }
 
-func (reader *lineReader) ReadLine(prompt string, output io.Writer) (string, error) {
-	reader.mu.Lock()
-	defer reader.mu.Unlock()
-	if prompt == "" {
-		prompt = "> "
+// Run performs the full lifecycle: validate, connect, discover, loop, clean up.
+func Run(ctx context.Context, config Config, stdout io.Writer, stderr io.Writer) error {
+	logger := log.New(stderr, "agent: ", 0)
+
+	if err := config.Validate(); err != nil {
+		return err
 	}
-	if _, err := io.WriteString(output, prompt); err != nil {
-		return "", err
+	logger.Printf("workspace=%s model=%s", config.Workspace, config.Model)
+
+	model := llm.New(config.LlamaURL, config.Model)
+	if err := model.Ping(ctx); err != nil {
+		return err
 	}
-	line, err := reader.reader.ReadString('\n')
+	logger.Printf("llama-server reachable at %s", config.LlamaURL)
+
+	mcpCtx, cancelMCP := context.WithCancel(ctx)
+	defer cancelMCP()
+
+	args := append([]string{}, config.MCPArgs...)
+	args = append(args, "--workspace", config.Workspace)
+	client, err := mcpclient.StartProcess(mcpCtx, config.MCPCommand, args, config.Workspace, stderr)
 	if err != nil {
-		if errors.Is(err, io.EOF) && line != "" {
-			return strings.TrimRight(line, "\r\n"), nil
-		}
-		return "", err
+		return err
 	}
-	return strings.TrimRight(line, "\r\n"), nil
+	defer client.Close()
+
+	startupCtx, cancelStartup := context.WithTimeout(ctx, MCPStartupTimeout)
+	defer cancelStartup()
+	info, err := client.Initialize(startupCtx)
+	if err != nil {
+		return fmt.Errorf("MCP session could not be established: %w", err)
+	}
+	logger.Printf("MCP server %s %s ready", info.ServerInfo.Name, info.ServerInfo.Version)
+
+	tools, err := client.ListTools(startupCtx)
+	if err != nil {
+		return fmt.Errorf("tool discovery failed: %w", err)
+	}
+	discovered := FilterDiscovered(tools, logger)
+	if len(discovered) == 0 {
+		return errors.New("no allowed tools were discovered")
+	}
+
+	session := &Session{
+		config:     config,
+		model:      model,
+		mcp:        client,
+		discovered: discovered,
+		logger:     logger,
+		out:        stdout,
+	}
+	return session.Loop(ctx)
 }
 
-func clientFromEnv() (*apiClient, error) {
-	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
-	if apiKey == "" {
-		return nil, errors.New("OPENAI_API_KEY is required")
+// FilterDiscovered keeps only tools allowed by the read-only policy. Unexpected
+// tools are logged and denied.
+func FilterDiscovered(tools []mcpproto.Tool, logger *log.Logger) map[string]mcpproto.Tool {
+	allowed := make(map[string]struct{}, len(AllowedTools))
+	for _, name := range AllowedTools {
+		allowed[name] = struct{}{}
 	}
-	model := strings.TrimSpace(os.Getenv("OPENAI_MODEL"))
-	if model == "" {
-		return nil, errors.New("OPENAI_MODEL is required: set it to the local model alias configured in llama-server")
-	}
-	baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
-	if baseURL == "" {
-		baseURL = defaultBaseURL
-	}
-	if !isLocalURL(baseURL) {
-		return nil, fmt.Errorf("OPENAI_BASE_URL %q is not a local endpoint: only loopback addresses (127.0.0.1, localhost, ::1) are allowed", baseURL)
-	}
-	requestTimeout := defaultRequestTimeout
-	if value := strings.TrimSpace(os.Getenv("OPENAI_REQUEST_TIMEOUT")); value != "" {
-		parsedTimeout, err := time.ParseDuration(value)
-		if err != nil || parsedTimeout < 0 {
-			return nil, fmt.Errorf("invalid OPENAI_REQUEST_TIMEOUT %q: expected a non-negative duration", value)
+	kept := make(map[string]mcpproto.Tool, len(tools))
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if _, ok := allowed[tool.Name]; !ok {
+			if logger != nil {
+				logger.Printf("denied unexpected tool %q advertised by the MCP server", tool.Name)
+			}
+			continue
 		}
-		requestTimeout = parsedTimeout
+		kept[tool.Name] = tool
+		names = append(names, tool.Name)
 	}
-	return &apiClient{
-		httpClient: &http.Client{Timeout: requestTimeout},
-		apiKey:     apiKey,
-		model:      model,
-		baseURL:    strings.TrimRight(baseURL, "/"),
+	sort.Strings(names)
+	if logger != nil {
+		logger.Printf("discovered tools: %s", strings.Join(names, ", "))
+		for _, name := range AllowedTools {
+			if _, ok := kept[name]; !ok {
+				logger.Printf("warning: allowed tool %q was not advertised", name)
+			}
+		}
+	}
+	return kept
+}
+
+// Loop runs the bounded agent loop.
+func (s *Session) Loop(ctx context.Context) error {
+	profile := SelectProfile(s.config.Prompt)
+	exposed, tools := s.exposeProfile(profile)
+	if len(exposed) == 0 {
+		return fmt.Errorf("profile %q has no usable tools", profile.Name)
+	}
+	s.logger.Printf("profile=%s exposed=%s", profile.Name, strings.Join(toolNames(tools), ", "))
+
+	messages := []llm.Message{
+		{Role: "system", Content: SystemPrompt},
+		{Role: "user", Content: s.config.Prompt},
+	}
+
+	for round := 1; round <= MaxModelRounds; round++ {
+		s.logger.Printf("model round %d/%d", round, MaxModelRounds)
+		pruned, err := pruneMessages(messages, tools)
+		if err != nil {
+			return err
+		}
+		reply, err := s.model.Complete(ctx, pruned, tools)
+		if err != nil {
+			return err
+		}
+		messages = append(messages, reply)
+
+		if len(reply.ToolCalls) == 0 {
+			fmt.Fprintln(s.out, strings.TrimSpace(reply.Content))
+			return nil
+		}
+
+		for index, call := range reply.ToolCalls {
+			message, err := s.runToolCall(ctx, exposed, call, round, index)
+			if err != nil {
+				return err
+			}
+			messages = append(messages, message)
+		}
+	}
+
+	fmt.Fprintln(s.out, RoundLimitMessage)
+	return nil
+}
+
+func (s *Session) exposeProfile(profile Profile) (map[string]mcpproto.Tool, []llm.Tool) {
+	exposed := make(map[string]mcpproto.Tool, len(profile.Tools))
+	tools := make([]llm.Tool, 0, len(profile.Tools))
+	for _, name := range profile.Tools {
+		if len(tools) >= MaxExposedTools {
+			break
+		}
+		discovered, ok := s.discovered[name]
+		if !ok {
+			s.logger.Printf("warning: profile tool %q is unavailable", name)
+			continue
+		}
+		adapted, err := AdaptTool(discovered)
+		if err != nil {
+			s.logger.Printf("warning: tool %q has an unusable schema", name)
+			continue
+		}
+		exposed[name] = discovered
+		tools = append(tools, adapted)
+	}
+	return exposed, tools
+}
+
+// AdaptTool converts an MCP tool definition to the model function-tool
+// envelope, preserving the JSON-schema constraints.
+func AdaptTool(tool mcpproto.Tool) (llm.Tool, error) {
+	parameters := map[string]any{}
+	if err := json.Unmarshal(tool.InputSchema, &parameters); err != nil {
+		return llm.Tool{}, fmt.Errorf("tool %q has an invalid input schema", tool.Name)
+	}
+	return llm.Tool{
+		Type: "function",
+		Function: llm.Function{
+			Name:        tool.Name,
+			Description: tool.Description,
+			Parameters:  parameters,
+		},
 	}, nil
 }
 
-// isLocalURL returns true if rawURL's host is a loopback address.
-// It accepts 127.0.0.1, localhost, ::1, and any port on those hosts.
-// httptest.NewServer also binds to 127.0.0.1, so test URLs pass as well.
-func isLocalURL(rawURL string) bool {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	host := u.Hostname()
-	return host == "127.0.0.1" || host == "localhost" || host == "::1"
-}
-
-func (client *apiClient) Complete(ctx context.Context, messages []message, tools []toolDefinition, options chatCompleteOptions) (message, error) {
-	toolChoice := options.ToolChoice
-	if len(tools) > 0 && toolChoice == nil {
-		toolChoice = "auto"
-	}
-	requestBody, err := json.Marshal(chatRequest{Model: client.model, Messages: messages, Tools: tools, ToolChoice: toolChoice})
-	if err != nil {
-		return message{}, err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.baseURL+"/chat/completions", bytes.NewReader(requestBody))
-	if err != nil {
-		return message{}, err
-	}
-	request.Header.Set("Authorization", "Bearer "+client.apiKey)
-	request.Header.Set("Content-Type", "application/json")
-	response, err := client.httpClient.Do(request)
-	if err != nil {
-		return message{}, err
-	}
-	defer response.Body.Close()
-	responseBody, readErr := io.ReadAll(response.Body)
-	if readErr != nil {
-		return message{}, fmt.Errorf("read response: %w", readErr)
-	}
-	if response.StatusCode >= http.StatusBadRequest {
-		var payload chatResponse
-		_ = json.Unmarshal(responseBody, &payload)
-		if payload.Error != nil && payload.Error.Message != "" {
-			return message{}, fmt.Errorf("api error: status %d: %s", response.StatusCode, payload.Error.Message)
-		}
-		text := strings.TrimSpace(string(responseBody))
-		if text == "" {
-			return message{}, fmt.Errorf("api error: status %d", response.StatusCode)
-		}
-		return message{}, fmt.Errorf("api error: status %d: %s", response.StatusCode, text)
-	}
-	var payload chatResponse
-	if err := json.Unmarshal(responseBody, &payload); err != nil {
-		return message{}, fmt.Errorf("decode response: %w", err)
-	}
-	if len(payload.Choices) == 0 {
-		return message{}, errors.New("api error: no choices returned")
-	}
-	return payload.Choices[0].Message, nil
-}
-
-func completeTurn(ctx context.Context, client chatClient, messages []message, tools []toolDefinition) ([]message, string, error) {
-	ws, err := workspace.New("", workspace.DefaultLimits())
-	if err != nil {
-		return nil, "", err
-	}
-	runtime := &toolRuntime{workspace: ws, policy: approval.Policy{Yolo: true, Interactive: false}}
-	return completeTurnWithRuntime(ctx, client, messages, tools, runtime)
-}
-
-func completeTurnWithRuntime(ctx context.Context, client chatClient, messages []message, tools []toolDefinition, dispatcher toolDispatcher) ([]message, string, error) {
-	return completeTurnWithRuntimeOptions(ctx, client, messages, tools, dispatcher, false, DefaultMaxToolRounds)
-}
-
-func completeTurnWithRuntimeOptions(ctx context.Context, client chatClient, messages []message, tools []toolDefinition, dispatcher toolDispatcher, forceNativeToolCall bool, maxToolRounds int) ([]message, string, error) {
-	maxToolRounds = normalizeMaxToolRounds(maxToolRounds)
-	for i := 0; i < maxToolRounds; i++ {
-		options := chatCompleteOptions{}
-		if len(tools) > 0 {
-			options.ToolChoice = "auto"
-			if forceNativeToolCall {
-				options.ToolChoice = "required"
-			}
-		}
-		assistantMessage, err := client.Complete(ctx, messages, tools, options)
-		if err != nil {
-			return nil, "", err
-		}
-		if len(assistantMessage.ToolCalls) == 0 {
-			text, err := contentText(assistantMessage.Content)
-			if err != nil {
-				return nil, "", err
-			}
-			if strings.TrimSpace(text) == "" {
-				return messages, "", errors.New("assistant returned an empty response")
-			}
-			if textualCall, ok, err := parseTextualToolCall(text, tools, fmt.Sprintf("textual_call_%d", i+1)); err != nil {
-				return nil, "", err
-			} else if ok {
-				assistantMessage = message{Role: "assistant", ToolCalls: []toolCall{textualCall}}
-			} else {
-				messages = append(messages, message{Role: "assistant", Content: text})
-				return messages, text, nil
-			}
-		}
-		forceNativeToolCall = false
-		messages = append(messages, message{Role: "assistant", Content: assistantMessage.Content, ToolCalls: assistantMessage.ToolCalls})
-		for _, call := range assistantMessage.ToolCalls {
-			if call.ID == "" {
-				return nil, "", errors.New("malformed tool call: missing id")
-			}
-			toolOutput := dispatcher.Execute(ctx, call)
-			messages = append(messages, message{
-				Role:       "tool",
-				ToolCallID: call.ID,
-				Name:       call.Function.Name,
-				Content:    toolOutput,
-			})
-		}
-	}
-	return synthesizeBudgetExhaustedTurn(ctx, client, messages, maxToolRounds)
-}
-
-func completeTurnRequiringWrites(ctx context.Context, client chatClient, messages []message, tools []toolDefinition, dispatcher toolDispatcher, ws *workspace.Workspace, requiredWrites []string, events *[]ToolEvent) ([]message, string, error) {
-	return completeTurnRequiringWritesWithLimit(ctx, client, messages, tools, dispatcher, ws, requiredWrites, events, DefaultMaxToolRounds)
-}
-
-func completeTurnRequiringWritesWithLimit(ctx context.Context, client chatClient, messages []message, tools []toolDefinition, dispatcher toolDispatcher, ws *workspace.Workspace, requiredWrites []string, events *[]ToolEvent, maxToolRounds int) ([]message, string, error) {
-	maxToolRounds = normalizeMaxToolRounds(maxToolRounds)
-	initialMessageCount := len(messages)
-	updated, answer, err := completeTurnWithRuntimeOptions(ctx, client, messages, tools, dispatcher, false, maxToolRounds)
-	if err != nil || len(requiredWrites) == 0 {
-		return updated, answer, err
-	}
-	unmet := unmetRequiredWrites(ws, eventSlice(events), requiredWrites)
-	if len(unmet) == 0 {
-		return updated, answer, nil
-	}
-	remainingToolRounds := maxToolRounds - countToolRounds(updated[initialMessageCount:])
-	if remainingToolRounds <= 0 {
-		return updated, answer, requiredWriteError(unmet[0])
-	}
-	repairMessages := append(append([]message{}, updated...), message{
-		Role:    "user",
-		Content: buildRequiredWriteRepairPrompt(unmet),
-	})
-	repaired, repairedAnswer, repairErr := completeTurnWithRuntimeOptions(ctx, client, repairMessages, tools, dispatcher, true, remainingToolRounds)
-	if repairErr == nil {
-		updated = repaired
-		answer = repairedAnswer
-	} else {
-		updated = repairMessages
-	}
-	unmet = unmetRequiredWrites(ws, eventSlice(events), requiredWrites)
-	if len(unmet) == 0 {
-		return updated, answer, nil
-	}
-	return updated, answer, requiredWriteError(unmet[0])
-}
-
-func countToolRounds(messages []message) int {
-	count := 0
-	for _, current := range messages {
-		if current.Role == "assistant" && len(current.ToolCalls) > 0 {
-			count++
-		}
-	}
-	return count
-}
-
-func normalizeMaxToolRounds(value int) int {
-	if value <= 0 {
-		return DefaultMaxToolRounds
-	}
-	return value
-}
-
-func synthesizeBudgetExhaustedTurn(ctx context.Context, client chatClient, messages []message, maxToolRounds int) ([]message, string, error) {
-	synthesisPrompt := message{
-		Role:    "user",
-		Content: fmt.Sprintf("The tool budget of %d rounds is exhausted. Do not call tools. Briefly summarize completed work, validation performed, and any remaining work or uncertainty.", maxToolRounds),
-	}
-	requestMessages := append(append([]message{}, messages...), synthesisPrompt)
-	assistantMessage, err := client.Complete(ctx, requestMessages, nil, chatCompleteOptions{ToolChoice: "none"})
-	if err != nil {
-		return messages, "", fmt.Errorf("tool budget exhausted after %d rounds; final summary failed: %w", maxToolRounds, err)
-	}
-	text, err := contentText(assistantMessage.Content)
-	if err != nil {
-		return messages, "", err
-	}
-	if strings.TrimSpace(text) == "" {
-		return messages, "", fmt.Errorf("tool budget exhausted after %d rounds; assistant returned an empty final summary", maxToolRounds)
-	}
-	messages = append(requestMessages, message{Role: "assistant", Content: text})
-	return messages, text, nil
-}
-
-func contentText(content any) (string, error) {
-	switch value := content.(type) {
-	case string:
-		return value, nil
-	case []any:
-		var builder strings.Builder
-		for _, item := range value {
-			switch part := item.(type) {
-			case string:
-				builder.WriteString(part)
-			case map[string]any:
-				if text, ok := part["text"].(string); ok {
-					builder.WriteString(text)
-				}
-			}
-		}
-		return builder.String(), nil
-	case map[string]any:
-		if text, ok := value["text"].(string); ok {
-			return text, nil
-		}
-		return "", errors.New("assistant content object did not contain a text field")
-	case nil:
-		return "", nil
-	default:
-		return "", fmt.Errorf("unexpected assistant content type %T", content)
-	}
-}
-
-func parseTextualToolCall(text string, tools []toolDefinition, fallbackID string) (toolCall, bool, error) {
-	if len(tools) == 0 {
-		return toolCall{}, false, nil
-	}
-	candidate, ok := extractStandaloneJSONObject(text)
-	if !ok {
-		return toolCall{}, false, nil
-	}
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(candidate), &payload); err != nil {
-		return toolCall{}, false, nil
-	}
-	if len(payload) == 0 {
-		return toolCall{}, false, nil
-	}
-	_, hasName := payload["name"]
-	_, hasArguments := payload["arguments"]
-	if !hasName && !hasArguments {
-		return toolCall{}, false, nil
-	}
-	for key := range payload {
-		switch key {
-		case "name", "arguments", "id", "type":
-		default:
-			return toolCall{}, false, nil
-		}
-	}
-	if !hasName || !hasArguments {
-		return toolCall{}, false, nil
-	}
-	var envelope struct {
-		ID        string          `json:"id"`
-		Type      string          `json:"type"`
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
-	}
-	decoder := json.NewDecoder(strings.NewReader(candidate))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&envelope); err != nil {
-		return toolCall{}, false, nil
-	}
-	if strings.TrimSpace(envelope.Name) == "" {
-		return toolCall{}, false, nil
-	}
-	if envelope.Type != "" && envelope.Type != "function" {
-		return toolCall{}, false, nil
-	}
-	toolNames := make(map[string]struct{}, len(tools))
+func toolNames(tools []llm.Tool) []string {
+	names := make([]string, 0, len(tools))
 	for _, tool := range tools {
-		toolNames[tool.Function.Name] = struct{}{}
+		names = append(names, tool.Function.Name)
 	}
-	if _, ok := toolNames[envelope.Name]; !ok {
-		return toolCall{}, false, nil
-	}
-	arguments, err := normalizeTextualToolArguments(envelope.Arguments)
-	if err != nil {
-		return toolCall{}, false, nil
-	}
-	callID := strings.TrimSpace(envelope.ID)
-	if callID == "" {
-		callID = fallbackID
-	}
-	return toolCall{
-		ID:   callID,
-		Type: "function",
-		Function: toolFunction{
-			Name:      envelope.Name,
-			Arguments: arguments,
-		},
-	}, true, nil
-}
-
-func normalizeTextualToolArguments(raw json.RawMessage) (map[string]any, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		return nil, errors.New("arguments are required")
-	}
-	switch trimmed[0] {
-	case '{':
-		var arguments map[string]any
-		if err := json.Unmarshal(trimmed, &arguments); err != nil {
-			return nil, err
-		}
-		return arguments, nil
-	case '"':
-		var encoded string
-		if err := json.Unmarshal(trimmed, &encoded); err != nil {
-			return nil, err
-		}
-		decoded := strings.TrimSpace(encoded)
-		if decoded == "" {
-			return nil, errors.New("arguments must decode to a JSON object")
-		}
-		var arguments map[string]any
-		if err := json.Unmarshal([]byte(decoded), &arguments); err != nil {
-			return nil, err
-		}
-		return arguments, nil
-	default:
-		return nil, errors.New("arguments must be a JSON object or a JSON-encoded object")
-	}
-}
-
-func extractStandaloneJSONObject(text string) (string, bool) {
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
-		return "", false
-	}
-	if strings.HasPrefix(trimmed, "```") {
-		fenceEnd := strings.LastIndex(trimmed, "```")
-		if fenceEnd <= 2 {
-			return "", false
-		}
-		rest := strings.TrimSpace(trimmed[fenceEnd+3:])
-		if rest != "" {
-			return "", false
-		}
-		newline := strings.IndexByte(trimmed, '\n')
-		if newline == -1 {
-			return "", false
-		}
-		language := strings.TrimSpace(trimmed[3:newline])
-		if language != "" && !strings.EqualFold(language, "json") {
-			return "", false
-		}
-		trimmed = strings.TrimSpace(trimmed[newline+1 : fenceEnd])
-	}
-	if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
-		return "", false
-	}
-	var payload map[string]any
-	decoder := json.NewDecoder(strings.NewReader(trimmed))
-	if err := decoder.Decode(&payload); err != nil {
-		return "", false
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return "", false
-	}
-	return trimmed, true
-}
-
-func previewText(text string, limit int) string {
-	normalized := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
-	if limit <= 0 || len(normalized) <= limit {
-		return normalized
-	}
-	return normalized[:limit] + "..."
-}
-
-type toolResult struct {
-	Success  bool   `json:"success"`
-	Error    string `json:"error,omitempty"`
-	Code     string `json:"code,omitempty"`
-	Approved *bool  `json:"approved,omitempty"`
-	Data     any    `json:"data,omitempty"`
-}
-
-type runCoreutilInput struct {
-	Utility string   `json:"utility"`
-	Args    []string `json:"args"`
-	Stdin   string   `json:"stdin"`
-}
-
-type listFilesInput struct {
-	Path    string   `json:"path"`
-	Depth   int      `json:"depth"`
-	Include []string `json:"include"`
-	Exclude []string `json:"exclude"`
-}
-
-type readFileInput struct {
-	Path      string `json:"path"`
-	StartLine int    `json:"start_line"`
-	EndLine   int    `json:"end_line"`
-}
-
-type searchFilesInput struct {
-	Query      string `json:"query"`
-	Path       string `json:"path"`
-	MaxResults int    `json:"max_results"`
-}
-
-type writeFileInput struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-}
-
-type applyPatchInput struct {
-	Patch string `json:"patch"`
-}
-
-type mkdirInput struct {
-	Path string `json:"path"`
-}
-
-func executeToolCall(ctx context.Context, call toolCall) string {
-	ws, err := workspace.New("", workspace.DefaultLimits())
-	if err != nil {
-		return marshalToolResult(toolResult{Success: false, Error: err.Error()})
-	}
-	runtime := &toolRuntime{workspace: ws, policy: approval.Policy{Yolo: true, Interactive: false}}
-	return executeToolCallWithRuntime(ctx, runtime, call)
-}
-
-func executeToolCallWithRuntime(ctx context.Context, runtime *toolRuntime, call toolCall) string {
-	result := toolResult{Success: false}
-	switch call.Function.Name {
-	case "run_coreutil":
-		input, err := decodeArguments[runCoreutilInput](call.Function.Arguments)
-		if err != nil {
-			result.Error = fmt.Sprintf("malformed tool arguments: %v", err)
-			return marshalToolResult(result)
-		}
-		if input.Utility == "" {
-			result.Error = "malformed tool arguments: utility is required"
-			return marshalToolResult(result)
-		}
-		if !supportsUtility(input.Utility) {
-			result.Error = fmt.Sprintf("unsupported utility %q", input.Utility)
-			return marshalToolResult(result)
-		}
-		var stdout, stderr bytes.Buffer
-		err = coreutils.Run(ctx, input.Utility, input.Args, bytes.NewBufferString(input.Stdin), &stdout, &stderr)
-		if err != nil {
-			result.Error = err.Error()
-			result.Data = map[string]any{"utility": input.Utility, "stdout": stdout.String(), "stderr": stderr.String()}
-			return marshalToolResult(result)
-		}
-		result.Success = true
-		result.Data = map[string]any{"utility": input.Utility, "stdout": stdout.String(), "stderr": stderr.String()}
-		return marshalToolResult(result)
-	case "list_files":
-		input, err := decodeArguments[listFilesInput](call.Function.Arguments)
-		if err != nil {
-			result.Error = fmt.Sprintf("malformed tool arguments: %v", err)
-			return marshalToolResult(result)
-		}
-		list, err := runtime.workspace.ListFiles(workspace.ListOptions{Path: input.Path, Depth: input.Depth, Include: input.Include, Exclude: input.Exclude})
-		if err != nil {
-			result.Error = err.Error()
-			return marshalToolResult(result)
-		}
-		result.Success = true
-		result.Data = list
-		return marshalToolResult(result)
-	case "read_file":
-		input, err := decodeArguments[readFileInput](call.Function.Arguments)
-		if err != nil {
-			result.Error = fmt.Sprintf("malformed tool arguments: %v", err)
-			return marshalToolResult(result)
-		}
-		if strings.TrimSpace(input.Path) == "" {
-			result.Error = "path is required"
-			return marshalToolResult(result)
-		}
-		read, err := runtime.workspace.ReadFile(input.Path, input.StartLine, input.EndLine)
-		if err != nil {
-			result.Error = err.Error()
-			return marshalToolResult(result)
-		}
-		result.Success = true
-		result.Data = read
-		return marshalToolResult(result)
-	case "search_files":
-		input, err := decodeArguments[searchFilesInput](call.Function.Arguments)
-		if err != nil {
-			result.Error = fmt.Sprintf("malformed tool arguments: %v", err)
-			return marshalToolResult(result)
-		}
-		search, err := runtime.workspace.SearchFiles(workspace.SearchOptions{Query: input.Query, Path: input.Path, MaxResults: input.MaxResults})
-		if err != nil {
-			result.Error = err.Error()
-			return marshalToolResult(result)
-		}
-		result.Success = true
-		result.Data = search
-		return marshalToolResult(result)
-	case "git_status":
-		status, err := gittools.Status(runtime.workspace.Root, runtime.workspace.Limits.MaxOutputBytes)
-		if err != nil {
-			result.Error = err.Error()
-			return marshalToolResult(result)
-		}
-		result.Success = true
-		result.Data = map[string]string{"text": status}
-		return marshalToolResult(result)
-	case "git_diff":
-		diff, err := gittools.Diff(runtime.workspace.Root, runtime.workspace.Limits.MaxOutputBytes)
-		if err != nil {
-			result.Error = err.Error()
-			return marshalToolResult(result)
-		}
-		result.Success = true
-		result.Data = map[string]string{"text": diff}
-		return marshalToolResult(result)
-	case "write_file":
-		input, err := decodeArguments[writeFileInput](call.Function.Arguments)
-		if err != nil {
-			result.Error = fmt.Sprintf("malformed tool arguments: %v", err)
-			return marshalToolResult(result)
-		}
-		allowed, denied := evaluateMutation(runtime, "write_file", previewWrite(input.Path, input.Content))
-		if !allowed {
-			return marshalToolResult(denied)
-		}
-		result.Approved = denied.Approved
-		if err := runtime.workspace.WriteFile(input.Path, input.Content); err != nil {
-			result.Error = err.Error()
-			return marshalToolResult(result)
-		}
-		normalizedPath, err := runtime.workspace.NormalizeRelativePath(input.Path)
-		if err != nil {
-			result.Error = err.Error()
-			return marshalToolResult(result)
-		}
-		result.Success = true
-		result.Data = map[string]any{"path": normalizedPath, "bytes": len(input.Content)}
-		return marshalToolResult(result)
-	case "apply_patch":
-		input, err := decodeArguments[applyPatchInput](call.Function.Arguments)
-		if err != nil {
-			result.Error = fmt.Sprintf("malformed tool arguments: %v", err)
-			return marshalToolResult(result)
-		}
-		if strings.TrimSpace(input.Patch) == "" {
-			result.Error = "patch is required"
-			return marshalToolResult(result)
-		}
-		allowed, denied := evaluateMutation(runtime, "apply_patch", previewPatch(input.Patch, runtime.workspace.Limits.MaxOutputBytes))
-		if !allowed {
-			return marshalToolResult(denied)
-		}
-		result.Approved = denied.Approved
-		applyResult, err := runtime.workspace.ApplyPatch(input.Patch)
-		if err != nil {
-			result.Error = err.Error()
-			return marshalToolResult(result)
-		}
-		result.Success = true
-		result.Data = applyResult
-		return marshalToolResult(result)
-	case "mkdir":
-		input, err := decodeArguments[mkdirInput](call.Function.Arguments)
-		if err != nil {
-			result.Error = fmt.Sprintf("malformed tool arguments: %v", err)
-			return marshalToolResult(result)
-		}
-		allowed, denied := evaluateMutation(runtime, "mkdir", "mkdir "+input.Path)
-		if !allowed {
-			return marshalToolResult(denied)
-		}
-		result.Approved = denied.Approved
-		if err := runtime.workspace.Mkdir(input.Path); err != nil {
-			result.Error = err.Error()
-			return marshalToolResult(result)
-		}
-		result.Success = true
-		result.Data = map[string]string{"path": input.Path}
-		return marshalToolResult(result)
-	default:
-		result.Error = fmt.Sprintf("unsupported tool %q", call.Function.Name)
-		return marshalToolResult(result)
-	}
-}
-
-func evaluateMutation(runtime *toolRuntime, toolName, preview string) (bool, toolResult) {
-	decision := runtime.policy.EvaluateMutation(toolName)
-	if decision.Allowed {
-		recordEvent(runtime.events, ToolEvent{Tool: toolName, Success: true})
-		return true, toolResult{}
-	}
-	if decision.NeedsApproval {
-		if runtime.prompt == nil {
-			result := toolResult{Success: false, Error: "approval prompt is unavailable", Code: "approval_prompt_unavailable"}
-			recordEvent(runtime.events, ToolEvent{Tool: toolName, Success: false, DeniedCode: result.Code, DeniedReason: result.Error})
-			return false, result
-		}
-		approved, err := runtime.prompt(preview)
-		if err != nil {
-			result := toolResult{Success: false, Error: fmt.Sprintf("approval failed: %v", err), Code: "approval_prompt_error"}
-			recordEvent(runtime.events, ToolEvent{Tool: toolName, Success: false, DeniedCode: result.Code, DeniedReason: result.Error})
-			return false, result
-		}
-		recordEvent(runtime.events, ToolEvent{Tool: toolName, Success: approved, Approved: boolPtr(approved)})
-		if !approved {
-			return false, toolResult{Success: false, Error: "mutation denied by user", Code: "approval_denied", Approved: boolPtr(false)}
-		}
-		return true, toolResult{Approved: boolPtr(true)}
-	}
-	result := toolResult{Success: false, Error: decision.DeniedReason, Code: decision.StructuredCode}
-	recordEvent(runtime.events, ToolEvent{Tool: toolName, Success: false, DeniedCode: decision.StructuredCode, DeniedReason: decision.DeniedReason})
-	return false, result
-}
-
-func recordEvent(events *[]ToolEvent, event ToolEvent) {
-	if events == nil {
-		return
-	}
-	if event.Tool == "" {
-		return
-	}
-	*events = append(*events, event)
-}
-
-func boolPtr(value bool) *bool {
-	return &value
-}
-
-func eventSlice(events *[]ToolEvent) []ToolEvent {
-	if events == nil {
-		return nil
-	}
-	return *events
-}
-
-func buildToolEvent(ws *workspace.Workspace, call toolCall, output string) ToolEvent {
-	event := ToolEvent{Tool: call.Function.Name}
-	var result toolResult
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		event.Success = false
-		event.DeniedReason = output
-		return event
-	}
-	event.Success = result.Success
-	event.DeniedCode = result.Code
-	event.DeniedReason = result.Error
-	event.Approved = result.Approved
-	if !result.Success || call.Function.Name != "write_file" || ws == nil {
-		return event
-	}
-	if data, ok := result.Data.(map[string]any); ok {
-		if path, ok := data["path"].(string); ok {
-			event.Path = path
-		}
-		switch value := data["bytes"].(type) {
-		case float64:
-			event.Bytes = int64(value)
-		case int64:
-			event.Bytes = value
-		case int:
-			event.Bytes = int64(value)
-		}
-	}
-	if event.Path == "" {
-		input, err := decodeArguments[writeFileInput](call.Function.Arguments)
-		if err != nil {
-			return event
-		}
-		normalized, err := ws.NormalizeRelativePath(input.Path)
-		if err != nil {
-			return event
-		}
-		event.Path = normalized
-	}
-	return event
-}
-
-func normalizeRequiredWrites(ws *workspace.Workspace, paths []string) ([]string, error) {
-	if len(paths) == 0 {
-		return nil, nil
-	}
-	normalized := make([]string, 0, len(paths))
-	seen := make(map[string]struct{}, len(paths))
-	for _, path := range paths {
-		value, err := ws.NormalizeRelativePath(path)
-		if err != nil {
-			return nil, err
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		normalized = append(normalized, value)
-	}
-	return normalized, nil
-}
-
-func unmetRequiredWrites(ws *workspace.Workspace, events []ToolEvent, requiredWrites []string) []string {
-	if len(requiredWrites) == 0 {
-		return nil
-	}
-	written := make(map[string]struct{}, len(requiredWrites))
-	for _, event := range events {
-		if event.Tool != "write_file" || !event.Success || event.Path == "" {
-			continue
-		}
-		if _, err := ws.StatFile(event.Path); err == nil {
-			written[event.Path] = struct{}{}
-		}
-	}
-	unmet := make([]string, 0)
-	for _, path := range requiredWrites {
-		if _, ok := written[path]; !ok {
-			unmet = append(unmet, path)
-		}
-	}
-	return unmet
-}
-
-func buildRequiredWriteRepairPrompt(paths []string) string {
-	label := "write"
-	if len(paths) > 1 {
-		label = "writes"
-	}
-	return fmt.Sprintf("The required %s was not completed: %s. Return exactly one `write_file` tool request for the required workspace-relative path or paths, either as native OpenAI-compatible `tool_calls` or as a standalone JSON object with only `name`, `arguments`, optional `id`, and optional `type\":\"function\"`. Do not return prose tool descriptions, shell commands, or shell substitutions. After the required write succeeds, you may return a brief final answer.", label, strings.Join(paths, ", "))
-}
-
-func requiredWriteError(path string) error {
-	return fmt.Errorf("required write was not completed: %s", path)
-}
-
-func previewWrite(path, content string) string {
-	const maxPreview = 512
-	short := content
-	if len(short) > maxPreview {
-		short = short[:maxPreview] + "\n... (truncated)"
-	}
-	return fmt.Sprintf("write_file preview for %s:\n--- %s\n+++ %s\n+%s", path, path, path, strings.ReplaceAll(short, "\n", "\n+"))
-}
-
-func previewPatch(patch string, max int) string {
-	if max <= 0 {
-		max = 1024
-	}
-	if len(patch) > max {
-		return patch[:max] + "\n... (truncated)"
-	}
-	return patch
-}
-
-func decodeArguments[T any](arguments any) (T, error) {
-	var zero T
-	var payload []byte
-	switch value := arguments.(type) {
-	case string:
-		payload = []byte(value)
-	case map[string]any:
-		data, err := json.Marshal(value)
-		if err != nil {
-			return zero, err
-		}
-		payload = data
-	case nil:
-		payload = []byte("{}")
-	default:
-		return zero, fmt.Errorf("unexpected arguments type %T", arguments)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.DisallowUnknownFields()
-	var input T
-	if err := decoder.Decode(&input); err != nil {
-		return zero, err
-	}
-	if decoder.More() {
-		return zero, errors.New("unexpected trailing JSON content")
-	}
-	return input, nil
-}
-
-func marshalToolResult(result toolResult) string {
-	data, marshalErr := json.Marshal(result)
-	if marshalErr != nil {
-		return `{"success":false,"error":"failed to marshal tool result"}`
-	}
-	return string(data)
-}
-
-func supportsUtility(name string) bool {
-	ensureUtilityMetadata()
-	_, ok := supportedUtilitySet[name]
-	return ok
-}
-
-func openAITools() []toolDefinition {
-	utilityNames := utilityNames()
-	return []toolDefinition{
-		functionTool("run_coreutil", "Run one available core utility with optional args and stdin.", map[string]any{
-			"type":                 "object",
-			"additionalProperties": false,
-			"required":             []string{"utility"},
-			"properties": map[string]any{
-				"utility": map[string]any{"type": "string", "enum": append([]string{}, utilityNames...)},
-				"args":    map[string]any{"type": "array", "items": map[string]string{"type": "string"}},
-				"stdin":   map[string]any{"type": "string"},
-			},
-		}),
-		functionTool("list_files", "List files from the workspace deterministically.", map[string]any{
-			"type":                 "object",
-			"additionalProperties": false,
-			"properties": map[string]any{
-				"path":    map[string]any{"type": "string"},
-				"depth":   map[string]any{"type": "integer", "minimum": 1},
-				"include": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"exclude": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-			},
-		}),
-		functionTool("read_file", "Read a text file from the workspace with line metadata.", map[string]any{
-			"type":                 "object",
-			"additionalProperties": false,
-			"required":             []string{"path"},
-			"properties": map[string]any{
-				"path":       map[string]any{"type": "string"},
-				"start_line": map[string]any{"type": "integer", "minimum": 1},
-				"end_line":   map[string]any{"type": "integer", "minimum": 1},
-			},
-		}),
-		functionTool("search_files", "Search text files in the workspace using literal matching.", map[string]any{
-			"type":                 "object",
-			"additionalProperties": false,
-			"required":             []string{"query"},
-			"properties": map[string]any{
-				"query":       map[string]any{"type": "string"},
-				"path":        map[string]any{"type": "string"},
-				"max_results": map[string]any{"type": "integer", "minimum": 1},
-			},
-		}),
-		functionTool("git_status", "Return git status --short for the workspace.", map[string]any{"type": "object", "additionalProperties": false}),
-		functionTool("git_diff", "Return current git diff for the workspace.", map[string]any{"type": "object", "additionalProperties": false}),
-		functionTool("write_file", "Atomically write a file in the workspace.", map[string]any{
-			"type":                 "object",
-			"additionalProperties": false,
-			"required":             []string{"path", "content"},
-			"properties": map[string]any{
-				"path":    map[string]any{"type": "string"},
-				"content": map[string]any{"type": "string"},
-			},
-		}),
-		functionTool("apply_patch", "Apply a bounded subset of unified diffs to regular files inside the workspace.", map[string]any{
-			"type":                 "object",
-			"additionalProperties": false,
-			"required":             []string{"patch"},
-			"properties": map[string]any{
-				"patch": map[string]any{"type": "string"},
-			},
-		}),
-		functionTool("mkdir", "Create workspace-confined directories.", map[string]any{
-			"type":                 "object",
-			"additionalProperties": false,
-			"required":             []string{"path"},
-			"properties": map[string]any{
-				"path": map[string]any{"type": "string"},
-			},
-		}),
-	}
-}
-
-func functionTool(name, description string, parameters map[string]any) toolDefinition {
-	return toolDefinition{Type: "function", Function: toolSpec{Name: name, Description: description, Parameters: parameters}}
-}
-
-func ensureUtilityMetadata() {
-	supportedUtilitiesOnce.Do(func() {
-		commands := coreutils.Commands()
-		supportedUtilityNames = make([]string, 0, len(commands))
-		supportedUtilitySet = make(map[string]struct{}, len(commands))
-		for _, command := range commands {
-			supportedUtilityNames = append(supportedUtilityNames, command.Name)
-			supportedUtilitySet[command.Name] = struct{}{}
-		}
-	})
-}
-
-func utilityNames() []string {
-	ensureUtilityMetadata()
-	return append([]string{}, supportedUtilityNames...)
-}
-
-func buildSystemPrompt(instructions string, sources []string) string {
-	prompt := baseSystemPrompt
-	if strings.TrimSpace(instructions) != "" {
-		prompt += "\n\nProject instructions loaded from: " + strings.Join(sources, ", ") + "\n" + instructions
-	}
-	return prompt
-}
-
-func loadSessionMessages(store *session.Store, sessionID string) ([]message, time.Time, error) {
-	snapshot, err := store.LoadLatestSnapshot(sessionID)
-	if err != nil {
-		return nil, time.Time{}, err
-	}
-	messages := make([]message, 0, len(snapshot.Messages))
-	for _, stored := range snapshot.Messages {
-		var content any
-		if len(stored.Content) > 0 {
-			if err := json.Unmarshal(stored.Content, &content); err != nil {
-				return nil, time.Time{}, fmt.Errorf("decode session message content: %w", err)
-			}
-		}
-		var toolCalls []toolCall
-		if len(stored.ToolCalls) > 0 {
-			if err := json.Unmarshal(stored.ToolCalls, &toolCalls); err != nil {
-				return nil, time.Time{}, fmt.Errorf("decode session tool calls: %w", err)
-			}
-		}
-		messages = append(messages, message{Role: stored.Role, Content: content, ToolCalls: toolCalls, ToolCallID: stored.ToolCallID, Name: stored.Name})
-	}
-	return messages, snapshot.CreatedAt, nil
-}
-
-func storeSnapshot(store *session.Store, sessionID string, createdAt time.Time, messages []message) error {
-	stored := make([]session.Message, 0, len(messages))
-	for _, messageEntry := range messages {
-		content, err := json.Marshal(messageEntry.Content)
-		if err != nil {
-			return err
-		}
-		toolCalls, err := json.Marshal(messageEntry.ToolCalls)
-		if err != nil {
-			return err
-		}
-		stored = append(stored, session.Message{
-			Role:       messageEntry.Role,
-			Content:    content,
-			ToolCalls:  toolCalls,
-			ToolCallID: messageEntry.ToolCallID,
-			Name:       messageEntry.Name,
-		})
-	}
-	return store.SaveSnapshot(sessionID, stored, createdAt, time.Now())
+	return names
 }

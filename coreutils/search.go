@@ -1,99 +1,73 @@
 package coreutils
 
 import (
-	"bufio"
-	"context"
+	"errors"
 	"fmt"
-	"io"
 	"regexp"
+	"strings"
 )
 
-const maxGrepInputSize int64 = 16 << 20
-
-func init() {
-	register(Command{"grep", "Search input lines using a regular expression or literal string", runGrep})
+// Match is a single grep match.
+type Match struct {
+	Line int    `json:"line"`
+	Text string `json:"text"`
 }
 
-func runGrep(ctx context.Context, args []string, stdin io.Reader, out, _ io.Writer) error {
-	lineNumbers, invert, literal := false, false, false
-	for len(args) > 0 {
-		switch args[0] {
-		case "-n":
-			lineNumbers, args = true, args[1:]
-		case "-v":
-			invert, args = true, args[1:]
-		case "-F":
-			literal, args = true, args[1:]
-		case "-E":
-			args = args[1:]
-		case "--":
-			args = args[1:]
-			goto parsed
-		default:
-			goto parsed
-		}
-	}
-parsed:
-	if len(args) == 0 {
-		return fmt.Errorf("grep: missing pattern")
-	}
-	pattern := args[0]
-	if literal {
-		pattern = regexp.QuoteMeta(pattern)
-	}
-	matcher, err := regexp.Compile(pattern)
-	if err != nil {
-		return fmt.Errorf("grep: invalid pattern: %w", err)
-	}
-	return eachInput(args[1:], stdin, func(_ string, input io.Reader) error {
-		scanner := bufio.NewScanner(&grepLimitReader{reader: input, remaining: maxGrepInputSize})
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		for line := 1; scanner.Scan(); line++ {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			matched := matcher.MatchString(scanner.Text())
-			if matched == invert {
-				continue
-			}
-			if lineNumbers {
-				if _, err := fmt.Fprintf(out, "%d:", line); err != nil {
-					return err
-				}
-			}
-			if _, err := fmt.Fprintln(out, scanner.Text()); err != nil {
-				return err
-			}
-		}
-		if err := scanner.Err(); err != nil {
-			return err
-		}
-		return nil
-	})
+// GrepOptions bounds a grep invocation.
+type GrepOptions struct {
+	Pattern    string
+	IgnoreCase bool
+	FixedText  bool
+	MaxMatches int
 }
 
-type grepLimitReader struct {
-	reader    io.Reader
-	remaining int64
-}
+// Grep searches text line by line and stops after MaxMatches matches.
+func Grep(text string, options GrepOptions) ([]Match, bool, error) {
+	if options.Pattern == "" {
+		return nil, false, errors.New("pattern must not be empty")
+	}
+	if len(options.Pattern) > 256 {
+		return nil, false, errors.New("pattern is too long")
+	}
+	if options.MaxMatches <= 0 {
+		options.MaxMatches = 20
+	}
 
-func (reader *grepLimitReader) Read(data []byte) (int, error) {
-	if reader.remaining == 0 {
-		var extra [1]byte
-		for {
-			count, err := reader.reader.Read(extra[:])
-			if count > 0 {
-				return 0, fmt.Errorf("grep: input exceeds %d MiB limit", maxGrepInputSize>>20)
-			}
-			if err != nil {
-				return 0, err
-			}
+	var matcher func(string) bool
+	if options.FixedText {
+		needle := options.Pattern
+		if options.IgnoreCase {
+			needle = strings.ToLower(needle)
+			matcher = func(line string) bool { return strings.Contains(strings.ToLower(line), needle) }
+		} else {
+			matcher = func(line string) bool { return strings.Contains(line, needle) }
 		}
+	} else {
+		pattern := options.Pattern
+		if options.IgnoreCase {
+			pattern = "(?i)" + pattern
+		}
+		expression, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, false, fmt.Errorf("invalid pattern: %s", err)
+		}
+		expression.Longest()
+		matcher = expression.MatchString
 	}
-	if int64(len(data)) > reader.remaining {
-		data = data[:reader.remaining]
+
+	matches := make([]Match, 0, options.MaxMatches)
+	truncated := false
+	for index, line := range SplitLines(text) {
+		if !matcher(line) {
+			continue
+		}
+		if len(matches) >= options.MaxMatches {
+			truncated = true
+			break
+		}
+		clamped, cut := ClampLine(line)
+		truncated = truncated || cut
+		matches = append(matches, Match{Line: index + 1, Text: clamped})
 	}
-	count, err := reader.reader.Read(data)
-	reader.remaining -= int64(count)
-	return count, err
+	return matches, truncated, nil
 }

@@ -3,1141 +3,345 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/groovy-sky/groovy-agent/internal/approval"
-	"github.com/groovy-sky/groovy-agent/internal/mcp"
-	"github.com/groovy-sky/groovy-agent/internal/session"
-	"github.com/groovy-sky/groovy-agent/internal/workspace"
+	"github.com/groovy-sky/groovy-agent/internal/llm"
+	"github.com/groovy-sky/groovy-agent/internal/mcpclient"
+	"github.com/groovy-sky/groovy-agent/internal/mcpproto"
+	"github.com/groovy-sky/groovy-agent/internal/mcpserver"
 )
 
-func TestAPIClientCompleteParsesToolCalls(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/chat/completions" {
-			t.Fatalf("path = %s", request.URL.Path)
-		}
+type fakeModel struct {
+	replies  []llm.Message
+	requests [][]llm.Message
+	tools    [][]llm.Tool
+}
 
-		if got := request.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer ") {
-			t.Fatalf("authorization = %q", got)
-		}
-		var payload chatRequest
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		if payload.Model != "test-model" {
-			t.Fatalf("model = %q", payload.Model)
-		}
-		if len(payload.Messages) != 1 || payload.Messages[0].Role != "user" {
-			t.Fatalf("unexpected messages: %+v", payload.Messages)
-		}
-		if payload.ToolChoice != "auto" {
-			t.Fatalf("tool_choice = %#v", payload.ToolChoice)
-		}
-		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"run_coreutil","arguments":"{\"utility\":\"pwd\"}"}}]}}]}`)
-	}))
-	defer server.Close()
+func (f *fakeModel) Complete(_ context.Context, messages []llm.Message, tools []llm.Tool) (llm.Message, error) {
+	f.requests = append(f.requests, append([]llm.Message{}, messages...))
+	f.tools = append(f.tools, tools)
+	if len(f.replies) == 0 {
+		return llm.Message{Role: "assistant", Content: "done"}, nil
+	}
+	reply := f.replies[0]
+	f.replies = f.replies[1:]
+	return reply, nil
+}
 
-	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
-	message, err := client.Complete(context.Background(), []message{{Role: "user", Content: "where am I"}}, openAITools(), chatCompleteOptions{})
+// newSession wires a session to a real in-process coreutils MCP server.
+func newSession(t *testing.T, workspace, prompt string, model modelClient) (*Session, *strings.Builder) {
+	t.Helper()
+	server, err := mcpserver.New(workspace, mcpserver.DefaultLimits(), log.New(io.Discard, "", 0))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("mcpserver.New failed: %v", err)
 	}
-	if len(message.ToolCalls) != 1 {
-		t.Fatalf("tool call count = %d", len(message.ToolCalls))
+	clientReader, serverWriter := io.Pipe()
+	serverReader, clientWriter := io.Pipe()
+	go func() {
+		_ = server.Serve(context.Background(), serverReader, serverWriter)
+		_ = serverWriter.Close()
+	}()
+
+	client := mcpclient.New(clientReader, clientWriter, nil)
+	t.Cleanup(client.Close)
+	if _, err := client.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize failed: %v", err)
 	}
-	if message.ToolCalls[0].Function.Name != "run_coreutil" {
-		t.Fatalf("tool = %q", message.ToolCalls[0].Function.Name)
+	tools, err := client.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+	output := &strings.Builder{}
+	session := &Session{
+		config:     Config{Workspace: workspace, Prompt: prompt},
+		model:      model,
+		mcp:        client,
+		discovered: FilterDiscovered(tools, nil),
+		logger:     log.New(io.Discard, "", 0),
+		out:        output,
+	}
+	return session, output
+}
+
+func toolCall(id, name, arguments string) llm.ToolCall {
+	return llm.ToolCall{ID: id, Type: "function", Function: llm.FunctionCall{Name: name, Arguments: arguments}}
+}
+
+func TestSelectProfileIsDeterministic(t *testing.T) {
+	cases := map[string]string{
+		"Use the date tool and report the exact current time.":     "date",
+		"Find occurrences of \"TODO\" in README.md.":               "file_search",
+		"Show the current workspace path and identify its README.": "file_inspection",
+		"Read the beginning of README.md and summarize it.":        "file_inspection",
+		"Count the unique sorted lines in the supplied text.":      "text_processing",
+		"Give me the basename of docs/guide.md":                    "path_processing",
+		"Explain quantum entanglement":                             "fallback",
+	}
+	for prompt, expected := range cases {
+		profile := SelectProfile(prompt)
+		if profile.Name != expected {
+			t.Errorf("prompt %q selected %q, expected %q", prompt, profile.Name, expected)
+		}
+		if len(profile.Tools) > MaxExposedTools {
+			t.Errorf("profile %q exposes %d tools", profile.Name, len(profile.Tools))
+		}
+	}
+	// Selection must be stable across repeated calls.
+	first := SelectProfile("Read README.md")
+	second := SelectProfile("Read README.md")
+	if first.Name != second.Name {
+		t.Fatal("profile selection is not deterministic")
 	}
 }
 
-func TestCompleteTurnExecutesToolCall(t *testing.T) {
-	var requestCount int
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requestCount++
-		var payload chatRequest
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-
-		switch requestCount {
-		case 1:
-			if payload.ToolChoice != "auto" {
-				t.Fatalf("request 1 tool_choice = %#v", payload.ToolChoice)
-			}
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"run_coreutil","arguments":"{\"utility\":\"cat\",\"stdin\":\"hello\\n\"}"}}]}}]}`)
-		case 2:
-			if payload.ToolChoice != "auto" {
-				t.Fatalf("request 2 tool_choice = %#v", payload.ToolChoice)
-			}
-			last := payload.Messages[len(payload.Messages)-1]
-			if last.Role != "tool" {
-				t.Fatalf("last role = %q", last.Role)
-			}
-			toolOutput, err := contentText(last.Content)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(toolOutput, `"stdout":"hello\n"`) {
-				t.Fatalf("unexpected tool output: %s", toolOutput)
-			}
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
-		}
-	}))
-	defer server.Close()
-
-	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
-	messages, answer, err := completeTurn(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "say hello"}}, openAITools())
-	if err != nil {
-		t.Fatal(err)
+func TestFilterDiscoveredDeniesUnexpectedTools(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object"}`)
+	tools := []mcpproto.Tool{
+		{Name: "pwd", InputSchema: schema},
+		{Name: "unlink", InputSchema: schema},
+		{Name: "exec_command", InputSchema: schema},
 	}
-	if answer != "done" {
-		t.Fatalf("answer = %q", answer)
+	kept := FilterDiscovered(tools, nil)
+	if _, ok := kept["pwd"]; !ok {
+		t.Fatal("allowed tool was dropped")
 	}
-	if got := len(messages); got != 5 {
-		t.Fatalf("message count = %d", got)
+	if _, ok := kept["unlink"]; ok {
+		t.Fatal("write-capable tool must be denied")
+	}
+	if _, ok := kept["exec_command"]; ok {
+		t.Fatal("unexpected tool must be denied")
 	}
 }
 
-func TestCompleteTurnSynthesizesAnswerWhenToolBudgetIsExhausted(t *testing.T) {
-	var requestCount int
-	dispatcher := &recordingDispatcher{}
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requestCount++
-		var payload chatRequest
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		switch requestCount {
-		case 1, 2:
-			if payload.ToolChoice != "auto" {
-				t.Fatalf("tool round %d choice = %#v", requestCount, payload.ToolChoice)
-			}
-			fmt.Fprintf(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_%d","type":"function","function":{"name":"git_status","arguments":"{}"}}]}}]}`, requestCount)
-		case 3:
-			if payload.ToolChoice != "none" {
-				t.Fatalf("synthesis tool_choice = %#v", payload.ToolChoice)
-			}
-			if len(payload.Tools) != 0 {
-				t.Fatalf("synthesis tools = %+v", payload.Tools)
-			}
-			last := payload.Messages[len(payload.Messages)-1]
-			content, ok := last.Content.(string)
-			if !ok || last.Role != "user" || !strings.Contains(content, "budget of 2 rounds") {
-				t.Fatalf("missing budget synthesis prompt: %+v", last)
-			}
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"Two checks completed; validation remains."}}]}`)
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
-		}
-	}))
-	defer server.Close()
+func TestLoopExecutesToolCallAndPrintsFinalAnswer(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("hello\nworld\n"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	model := &fakeModel{replies: []llm.Message{
+		{Role: "assistant", ToolCalls: []llm.ToolCall{toolCall("call-1", "head", `{"path":"README.md","lines":1}`)}},
+		{Role: "assistant", Content: "The file starts with hello."},
+	}}
+	session, output := newSession(t, workspace, "Read the beginning of README.md and summarize it.", model)
 
-	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
-	messages, answer, err := completeTurnWithRuntimeOptions(context.Background(), client, []message{{Role: "user", Content: "inspect"}}, openAITools(), dispatcher, false, 2)
-	if err != nil {
-		t.Fatal(err)
+	if err := session.Loop(context.Background()); err != nil {
+		t.Fatalf("Loop failed: %v", err)
 	}
-	if answer != "Two checks completed; validation remains." {
-		t.Fatalf("answer = %q", answer)
+	if strings.TrimSpace(output.String()) != "The file starts with hello." {
+		t.Fatalf("unexpected final answer %q", output.String())
 	}
-	if len(dispatcher.calls) != 2 {
-		t.Fatalf("dispatcher call count = %d", len(dispatcher.calls))
+	if len(model.requests) != 2 {
+		t.Fatalf("expected 2 model rounds, got %d", len(model.requests))
 	}
-	if len(messages) == 0 || messages[len(messages)-1].Role != "assistant" {
-		t.Fatalf("expected synthesized answer in transcript: %+v", messages)
+	second := model.requests[1]
+	assistant := second[len(second)-2]
+	toolResult := second[len(second)-1]
+	if len(assistant.ToolCalls) == 0 {
+		t.Fatal("the assistant tool-call message must precede the tool result")
+	}
+	if toolResult.Role != "tool" || toolResult.ToolCallID != "call-1" {
+		t.Fatalf("unexpected tool message %+v", toolResult)
+	}
+	if !strings.Contains(toolResult.Content, `"success":true`) || !strings.Contains(toolResult.Content, "hello") {
+		t.Fatalf("unexpected tool result %q", toolResult.Content)
+	}
+	for _, tool := range model.tools[0] {
+		if tool.Type != "function" || tool.Function.Parameters == nil {
+			t.Fatalf("tool %q was not adapted to the function envelope", tool.Function.Name)
+		}
 	}
 }
 
-func TestCompleteTurnEmptyResponsePreservesTranscript(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":""}}]}`)
-	}))
-	defer server.Close()
+func TestLoopStopsAtRoundLimit(t *testing.T) {
+	workspace := t.TempDir()
+	call := llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{toolCall("call-1", "pwd", `{}`)}}
+	model := &fakeModel{replies: []llm.Message{call, call, call}}
+	session, output := newSession(t, workspace, "Show the current workspace path.", model)
 
-	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
-	initial := []message{{Role: "user", Content: "inspect"}}
-	messages, _, err := completeTurnWithRuntime(context.Background(), client, initial, openAITools(), &recordingDispatcher{})
-	if err == nil {
-		t.Fatal("expected error")
+	if err := session.Loop(context.Background()); err != nil {
+		t.Fatalf("Loop failed: %v", err)
 	}
-	if len(messages) != len(initial) {
-		t.Fatalf("messages = %+v", messages)
+	if strings.TrimSpace(output.String()) != RoundLimitMessage {
+		t.Fatalf("unexpected output %q", output.String())
+	}
+	if len(model.requests) != MaxModelRounds {
+		t.Fatalf("expected %d rounds, got %d", MaxModelRounds, len(model.requests))
 	}
 }
 
-func TestCompleteTurnTextualToolCallExecutesAndContinues(t *testing.T) {
-	var requestCount int
-	dispatcher := &recordingDispatcher{}
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requestCount++
-		var payload chatRequest
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		switch requestCount {
-		case 1:
-			if payload.ToolChoice != "auto" {
-				t.Fatalf("request 1 tool_choice = %#v", payload.ToolChoice)
-			}
-			_, _ = io.WriteString(writer, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"name\\\":\\\"write_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"hello.go\\\",\\\"content\\\":\\\"package main\\\"}}\\n```\"}}]}")
-		case 2:
-			if payload.ToolChoice != "auto" {
-				t.Fatalf("request 2 tool_choice = %#v", payload.ToolChoice)
-			}
-			last := payload.Messages[len(payload.Messages)-1]
-			if last.Role != "tool" {
-				t.Fatalf("last role = %q", last.Role)
-			}
-			toolOutput, err := contentText(last.Content)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if toolOutput != `{"success":true}` {
-				t.Fatalf("unexpected tool output: %s", toolOutput)
-			}
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
-		}
-	}))
-	defer server.Close()
-
-	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
-	messages, answer, err := completeTurnWithRuntime(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "create file"}}, openAITools(), dispatcher)
-	if err != nil {
-		t.Fatal(err)
+func TestLoopRejectsInvalidToolCalls(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("hello\n"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
 	}
-	if answer != "done" {
-		t.Fatalf("answer = %q", answer)
-	}
-	if requestCount != 2 {
-		t.Fatalf("request count = %d", requestCount)
-	}
-	if len(dispatcher.calls) != 1 {
-		t.Fatalf("dispatcher call count = %d", len(dispatcher.calls))
-	}
-	if dispatcher.calls[0].Function.Name != "write_file" {
-		t.Fatalf("dispatcher tool = %q", dispatcher.calls[0].Function.Name)
-	}
-	if len(messages) == 0 || messages[len(messages)-1].Role != "assistant" {
-		t.Fatalf("expected final assistant response in transcript")
-	}
-}
-
-func TestCompleteTurnMalformedTextualToolCallTreatedAsText(t *testing.T) {
-	dispatcher := &recordingDispatcher{}
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		var payload chatRequest
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		if payload.ToolChoice != "auto" {
-			t.Fatalf("tool_choice = %#v", payload.ToolChoice)
-		}
-		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"name\":\"write_file\",\"arguments\":\"not-json\"}"}}]}`)
-	}))
-	defer server.Close()
-
-	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
-	_, answer, err := completeTurnWithRuntime(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "create file"}}, openAITools(), dispatcher)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if answer == "" {
-		t.Fatal("expected non-empty answer")
-	}
-	if len(dispatcher.calls) != 0 {
-		t.Fatalf("dispatcher call count = %d", len(dispatcher.calls))
-	}
-}
-
-func TestCompleteTurnFencedJSONExtraBraceTreatedAsText(t *testing.T) {
-	// Reproduces the Qwen2.5 case: fenced JSON with an extra closing brace must not
-	// abort the turn; it must be returned as ordinary assistant text without dispatching.
-	const fencedResponse = "```json\n{\"name\":\"write_file\",\"arguments\":{\"path\":\"date.txt\",\"content\":\"$(date)\"}}} \n```"
-	dispatcher := &recordingDispatcher{}
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		encoded, _ := json.Marshal(fencedResponse)
-		fmt.Fprintf(writer, `{"choices":[{"message":{"role":"assistant","content":%s}}]}`, encoded)
-	}))
-	defer server.Close()
-
-	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
-	_, answer, err := completeTurnWithRuntime(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "store current date in date.txt file"}}, openAITools(), dispatcher)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if answer == "" {
-		t.Fatal("expected non-empty answer")
-	}
-	if len(dispatcher.calls) != 0 {
-		t.Fatalf("no tool should be dispatched, got %d calls", len(dispatcher.calls))
-	}
-}
-
-func TestCompleteTurnRequiringWritesSatisfiedByNativeWrite(t *testing.T) {
-	var requestCount int
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requestCount++
-		var payload chatRequest
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		switch requestCount {
-		case 1:
-			if payload.ToolChoice != "auto" {
-				t.Fatalf("request 1 tool_choice = %#v", payload.ToolChoice)
-			}
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"time.txt\",\"content\":\"value\"}"}}]}}]}`)
-		case 2:
-			last := payload.Messages[len(payload.Messages)-1]
-			if last.Role != "tool" {
-				t.Fatalf("last role = %q", last.Role)
-			}
-			toolOutput, err := contentText(last.Content)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(toolOutput, `"path":"time.txt"`) {
-				t.Fatalf("unexpected tool output: %s", toolOutput)
-			}
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
-		}
-	}))
-	defer server.Close()
-
-	ws, err := workspace.New(t.TempDir(), workspace.DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
-	events := make([]ToolEvent, 0)
-	dispatcher := &eventDispatcher{
-		base:      &toolRuntime{workspace: ws, policy: approval.Policy{Yolo: true, Interactive: false}},
-		workspace: ws,
-		events:    &events,
-	}
-
-	_, answer, err := completeTurnRequiringWrites(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "write time.txt"}}, openAITools(), dispatcher, ws, []string{"time.txt"}, &events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if answer != "done" {
-		t.Fatalf("answer = %q", answer)
-	}
-	if got := len(events); got == 0 || events[0].Path != "time.txt" || !events[0].Success {
-		t.Fatalf("unexpected events: %+v", events)
-	}
-	if _, err := ws.StatFile("time.txt"); err != nil {
-		t.Fatalf("expected written file: %v", err)
-	}
-}
-
-func TestUnmetRequiredWrites(t *testing.T) {
-	ws, err := workspace.New(t.TempDir(), workspace.DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ws.WriteFile("written.txt", "ok"); err != nil {
-		t.Fatal(err)
-	}
-
 	cases := []struct {
-		name   string
-		events []ToolEvent
-		want   []string
+		name     string
+		call     llm.ToolCall
+		category string
 	}{
-		{
-			name:   "write to different path fails",
-			events: []ToolEvent{{Tool: "write_file", Success: true, Path: "other.txt"}},
-			want:   []string{"written.txt"},
-		},
-		{
-			name:   "no write fails",
-			events: nil,
-			want:   []string{"written.txt"},
-		},
-		{
-			name:   "matching write succeeds",
-			events: []ToolEvent{{Tool: "write_file", Success: true, Path: "written.txt"}},
-			want:   nil,
-		},
+		{"unknown tool", toolCall("c1", "unlink", `{"path":"README.md"}`), mcpproto.ErrorUnknownTool},
+		{"non-exposed tool", toolCall("c1", "base64", `{"text":"hi"}`), mcpproto.ErrorUnknownTool},
+		{"non-object arguments", toolCall("c1", "cat", `"README.md"`), mcpproto.ErrorInvalidArguments},
+		{"schema violation", toolCall("c1", "cat", `{"path":"README.md","danger":true}`), mcpproto.ErrorInvalidArguments},
+		{"raised limit", toolCall("c1", "head", `{"path":"README.md","lines":100000}`), mcpproto.ErrorInvalidArguments},
+		{"path traversal", toolCall("c1", "cat", `{"path":"../../etc/passwd"}`), mcpproto.ErrorWorkspaceViolation},
+		{"absolute path", toolCall("c1", "cat", `{"path":"/etc/passwd"}`), mcpproto.ErrorWorkspaceViolation},
+		{"unsupported type", llm.ToolCall{ID: "c1", Type: "code", Function: llm.FunctionCall{Name: "cat"}}, mcpproto.ErrorInvalidArguments},
+		{"missing id", llm.ToolCall{Type: "function", Function: llm.FunctionCall{Name: "cat", Arguments: `{"path":"README.md"}`}}, mcpproto.ErrorInvalidArguments},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			unmet := unmetRequiredWrites(ws, testCase.events, []string{"written.txt"})
-			if strings.Join(unmet, ",") != strings.Join(testCase.want, ",") {
-				t.Fatalf("unmet = %v, want %v", unmet, testCase.want)
+			model := &fakeModel{replies: []llm.Message{
+				{Role: "assistant", ToolCalls: []llm.ToolCall{testCase.call}},
+				{Role: "assistant", Content: "sorry"},
+			}}
+			session, _ := newSession(t, workspace, "Read README.md", model)
+			if err := session.Loop(context.Background()); err != nil {
+				t.Fatalf("Loop failed: %v", err)
+			}
+			second := model.requests[1]
+			result := second[len(second)-1]
+			if !strings.Contains(result.Content, testCase.category) {
+				t.Fatalf("expected %q, got %q", testCase.category, result.Content)
 			}
 		})
 	}
 }
 
-func TestCompleteTurnRequiringWritesAcceptsTextualRepairToolCall(t *testing.T) {
-	var requestCount int
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requestCount++
-		var payload chatRequest
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
+func TestToolCallBudgetIsEnforced(t *testing.T) {
+	workspace := t.TempDir()
+	session, _ := newSession(t, workspace, "Show the current workspace path.", &fakeModel{})
+	exposed, _ := session.exposeProfile(SelectProfile(session.config.Prompt))
+
+	for index := 0; index < MaxTotalToolCalls+1; index++ {
+		message, err := session.runToolCall(context.Background(), exposed, toolCall("c", "pwd", `{}`), 1, index)
+		if err != nil {
+			t.Fatalf("runToolCall failed: %v", err)
 		}
-		switch requestCount {
-		case 1:
-			if payload.ToolChoice != "auto" {
-				t.Fatalf("request 1 tool_choice = %#v", payload.ToolChoice)
-			}
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
-		case 2:
-			if payload.ToolChoice != "required" {
-				t.Fatalf("request 2 tool_choice = %#v", payload.ToolChoice)
-			}
-			last := payload.Messages[len(payload.Messages)-1]
-			if last.Role != "user" || !strings.Contains(last.Content.(string), "standalone JSON object") {
-				t.Fatalf("missing required-write repair request: %+v", last)
-			}
-			_, _ = io.WriteString(writer, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"name\\\":\\\"write_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"time.txt\\\",\\\"content\\\":\\\"value\\\"}}\\n```\"}}]}")
-		case 3:
-			if payload.ToolChoice != "auto" {
-				t.Fatalf("request 3 tool_choice = %#v", payload.ToolChoice)
-			}
-			last := payload.Messages[len(payload.Messages)-1]
-			if last.Role != "tool" {
-				t.Fatalf("last role = %q", last.Role)
-			}
-			toolOutput, err := contentText(last.Content)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(toolOutput, `"path":"time.txt"`) {
-				t.Fatalf("unexpected tool output: %s", toolOutput)
-			}
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done after repair"}}]}`)
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
+		if index < MaxTotalToolCalls && !strings.Contains(message.Content, `"success":true`) {
+			t.Fatalf("call %d should have succeeded: %s", index, message.Content)
 		}
-	}))
-	defer server.Close()
-
-	ws, err := workspace.New(t.TempDir(), workspace.DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
-	events := make([]ToolEvent, 0)
-	dispatcher := &eventDispatcher{
-		base:      &toolRuntime{workspace: ws, policy: approval.Policy{Yolo: true, Interactive: false}},
-		workspace: ws,
-		events:    &events,
-	}
-
-	_, answer, err := completeTurnRequiringWrites(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "write time.txt"}}, openAITools(), dispatcher, ws, []string{"time.txt"}, &events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if answer != "done after repair" {
-		t.Fatalf("answer = %q", answer)
-	}
-	if got := len(events); got == 0 || events[0].Path != "time.txt" || !events[0].Success {
-		t.Fatalf("unexpected events: %+v", events)
-	}
-	if _, err := ws.StatFile("time.txt"); err != nil {
-		t.Fatalf("expected written file: %v", err)
-	}
-}
-
-func TestCompleteTurnRequiringWritesSharesToolBudgetWithRepair(t *testing.T) {
-	var requestCount int
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"other.txt\",\"content\":\"wrong\"}"}}]}}]}`)
-		case 2:
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
-		default:
-			t.Fatalf("tool budget should prevent a repair request, got request %d", requestCount)
-		}
-	}))
-	defer server.Close()
-
-	ws, err := workspace.New(t.TempDir(), workspace.DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
-	events := make([]ToolEvent, 0)
-	dispatcher := &eventDispatcher{
-		base:      &toolRuntime{workspace: ws, policy: approval.Policy{Yolo: true, Interactive: false}},
-		workspace: ws,
-		events:    &events,
-	}
-
-	_, _, err = completeTurnRequiringWritesWithLimit(context.Background(), client, []message{{Role: "user", Content: "write time.txt"}}, openAITools(), dispatcher, ws, []string{"time.txt"}, &events, 1)
-	if err == nil || err.Error() != "required write was not completed: time.txt" {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if requestCount != 2 {
-		t.Fatalf("request count = %d", requestCount)
-	}
-}
-
-func TestCompleteTurnDoesNotTreatProseJSONAsToolCall(t *testing.T) {
-	dispatcher := &recordingDispatcher{}
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		var payload chatRequest
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		if payload.ToolChoice != "auto" {
-			t.Fatalf("tool_choice = %#v", payload.ToolChoice)
-		}
-		_, _ = io.WriteString(writer, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Here is an example only:\\n```json\\n{\\\"name\\\":\\\"write_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"hello.go\\\",\\\"content\\\":\\\"package main\\\"}}\\n```\\nDo not execute this JSON.\"}}]}")
-	}))
-	defer server.Close()
-
-	client := &apiClient{httpClient: server.Client(), apiKey: "token", model: "test-model", baseURL: server.URL}
-	_, answer, err := completeTurnWithRuntime(context.Background(), client, []message{{Role: "system", Content: "system"}, {Role: "user", Content: "show an example"}}, openAITools(), dispatcher)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(answer, "example only") {
-		t.Fatalf("answer = %q", answer)
-	}
-	if len(dispatcher.calls) != 0 {
-		t.Fatalf("dispatcher call count = %d", len(dispatcher.calls))
-	}
-}
-
-func TestExecuteToolCallErrors(t *testing.T) {
-	output := executeToolCall(context.Background(), toolCall{ID: "call_1", Type: "function", Function: toolFunction{Name: "run_coreutil", Arguments: `{"utility":"missing"}`}})
-	if !strings.Contains(output, `"error":"unsupported utility \"missing\""`) {
-		t.Fatalf("unexpected output: %s", output)
-	}
-}
-
-func TestExecuteToolCallParsesObjectArguments(t *testing.T) {
-	output := executeToolCall(context.Background(), toolCall{ID: "call_1", Type: "function", Function: toolFunction{Name: "run_coreutil", Arguments: map[string]any{"utility": "cat", "stdin": "hi\n"}}})
-	if !strings.Contains(output, `"stdout":"hi\n"`) {
-		t.Fatalf("unexpected output: %s", output)
-	}
-}
-
-func TestExecuteToolCallPlanModeDeniesMutation(t *testing.T) {
-	ws, err := workspace.New(t.TempDir(), workspace.DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime := &toolRuntime{workspace: ws, policy: approval.Policy{PlanMode: true, Interactive: false}}
-	output := executeToolCallWithRuntime(context.Background(), runtime, toolCall{ID: "call_1", Type: "function", Function: toolFunction{Name: "write_file", Arguments: map[string]any{"path": "a.txt", "content": "x"}}})
-	if !strings.Contains(output, `"code":"plan_mode_denied"`) {
-		t.Fatalf("unexpected output: %s", output)
-	}
-}
-
-func TestApplyUnifiedPatch(t *testing.T) {
-	root := t.TempDir()
-	ws, err := workspace.New(root, workspace.DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ws.WriteFile("a.txt", "one\ntwo\n"); err != nil {
-		t.Fatal(err)
-	}
-	patch := "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+three\n"
-	if _, err := ws.ApplyPatch(patch); err != nil {
-		t.Fatal(err)
-	}
-	read, err := ws.ReadFile("a.txt", 0, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(read.Lines) != 2 || read.Lines[1].Text != "three" {
-		t.Fatalf("unexpected contents: %+v", read)
-	}
-}
-
-func TestClientFromEnvReadsOverrides(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "token")
-	t.Setenv("OPENAI_MODEL", "local-model")
-	t.Setenv("OPENAI_BASE_URL", "http://127.0.0.1:8080/v1/")
-	t.Setenv("OPENAI_REQUEST_TIMEOUT", "15m")
-
-	client, err := clientFromEnv()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if client.apiKey != "token" {
-		t.Fatalf("api key = %q", client.apiKey)
-	}
-	if client.model != "local-model" {
-		t.Fatalf("model = %q", client.model)
-	}
-	if client.baseURL != "http://127.0.0.1:8080/v1" {
-		t.Fatalf("baseURL = %q", client.baseURL)
-	}
-	if client.httpClient.Timeout != 15*time.Minute {
-		t.Fatalf("timeout = %s", client.httpClient.Timeout)
-	}
-}
-
-func TestClientFromEnvUsesLongRequestTimeoutByDefault(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "token")
-	t.Setenv("OPENAI_MODEL", "local-model")
-	t.Setenv("OPENAI_REQUEST_TIMEOUT", "")
-
-	client, err := clientFromEnv()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if client.httpClient.Timeout != defaultRequestTimeout {
-		t.Fatalf("timeout = %s", client.httpClient.Timeout)
-	}
-}
-
-func TestClientFromEnvRejectsInvalidRequestTimeout(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "token")
-	t.Setenv("OPENAI_MODEL", "local-model")
-	t.Setenv("OPENAI_REQUEST_TIMEOUT", "-1s")
-
-	if _, err := clientFromEnv(); err == nil {
-		t.Fatal("expected error")
-	}
-}
-
-func TestClientFromEnvAllowsDisabledRequestTimeout(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "token")
-	t.Setenv("OPENAI_MODEL", "local-model")
-	t.Setenv("OPENAI_REQUEST_TIMEOUT", "0")
-
-	client, err := clientFromEnv()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if client.httpClient.Timeout != 0 {
-		t.Fatalf("timeout = %s", client.httpClient.Timeout)
-	}
-}
-
-func TestClientFromEnvRequiresKey(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "")
-	if _, err := clientFromEnv(); err == nil {
-		t.Fatal("expected error")
-	}
-}
-
-func TestClientFromEnvRequiresModel(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "token")
-	t.Setenv("OPENAI_MODEL", "")
-	if _, err := clientFromEnv(); err == nil {
-		t.Fatal("expected error for missing OPENAI_MODEL")
-	}
-}
-
-func TestClientFromEnvRejectsRemoteURL(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "token")
-	t.Setenv("OPENAI_MODEL", "local-model")
-	t.Setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-	if _, err := clientFromEnv(); err == nil {
-		t.Fatal("expected error for remote OPENAI_BASE_URL")
-	}
-}
-
-func TestIsLocalURL(t *testing.T) {
-	cases := []struct {
-		url   string
-		local bool
-	}{
-		{"http://127.0.0.1:8080/v1", true},
-		{"http://localhost:8080/v1", true},
-		{"http://[::1]:8080/v1", true},
-		{"https://api.openai.com/v1", false},
-		{"http://example.com/v1", false},
-		{"http://10.0.0.1:8080/v1", false},
-	}
-	for _, c := range cases {
-		got := isLocalURL(c.url)
-		if got != c.local {
-			t.Errorf("isLocalURL(%q) = %v, want %v", c.url, got, c.local)
+		if index == MaxTotalToolCalls && !strings.Contains(message.Content, mcpproto.ErrorToolError) {
+			t.Fatalf("call %d should have exhausted the budget: %s", index, message.Content)
 		}
 	}
 }
 
-func TestMCPDispatcherCallsThroughMCP(t *testing.T) {
-	// Start an in-process MCP server and verify tool calls traverse it.
-	root := t.TempDir()
-	ws, err := workspace.New(root, workspace.DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
+func TestDeleteRequestHasNoWriteTool(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "README.md")
+	if err := os.WriteFile(path, []byte("hello\n"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
 	}
-	cfg := mcp.Config{
-		Workspace: ws,
-		Policy:    &approval.Policy{Yolo: true},
+	model := &fakeModel{replies: []llm.Message{
+		{Role: "assistant", ToolCalls: []llm.ToolCall{toolCall("c1", "unlink", `{"path":"README.md"}`)}},
+		{Role: "assistant", Content: "Deleting files is not available."},
+	}}
+	session, output := newSession(t, workspace, "Delete README.md.", model)
+	if err := session.Loop(context.Background()); err != nil {
+		t.Fatalf("Loop failed: %v", err)
 	}
-	mcpCli, stop, err := startInProcessMCP(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the file must not be mutated: %v", err)
 	}
-	defer stop()
+	if !strings.Contains(output.String(), "not available") {
+		t.Fatalf("unexpected answer %q", output.String())
+	}
+}
 
-	tools, err := mcpCli.listTools()
-	if err != nil {
-		t.Fatal(err)
+func TestAdaptToolPreservesSchema(t *testing.T) {
+	tool := mcpproto.Tool{
+		Name:        "head",
+		Description: "Read the first lines of a workspace file.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"lines":{"type":"integer","minimum":1,"maximum":200}},"required":["path"],"additionalProperties":false}`),
 	}
+	adapted, err := AdaptTool(tool)
+	if err != nil {
+		t.Fatalf("AdaptTool failed: %v", err)
+	}
+	if adapted.Type != "function" || adapted.Function.Name != "head" {
+		t.Fatalf("unexpected envelope %+v", adapted)
+	}
+	if adapted.Function.Parameters["additionalProperties"] != false {
+		t.Fatal("additionalProperties restriction was lost")
+	}
+	properties := adapted.Function.Parameters["properties"].(map[string]any)
+	lines := properties["lines"].(map[string]any)
+	if lines["maximum"].(float64) != 200 || lines["minimum"].(float64) != 1 {
+		t.Fatalf("numeric bounds were lost: %+v", lines)
+	}
+	if _, err := AdaptTool(mcpproto.Tool{Name: "bad", InputSchema: json.RawMessage(`[]`)}); err == nil {
+		t.Fatal("expected an invalid schema to be rejected")
+	}
+}
 
-	// tools/list must include workspace tools.
-	found := false
-	for _, td := range tools {
-		if td.Function.Name == "list_files" {
-			found = true
-			break
+func TestPruneMessagesBoundsHistory(t *testing.T) {
+	system := llm.Message{Role: "system", Content: SystemPrompt}
+	user := llm.Message{Role: "user", Content: "Read README.md"}
+	oversized := llm.Message{Role: "tool", ToolCallID: "c1", Content: strings.Repeat("x", 32<<10)}
+	messages := []llm.Message{
+		system,
+		{Role: "user", Content: "an older request"},
+		{Role: "assistant", Content: "an older answer"},
+		user,
+		{Role: "assistant", ToolCalls: []llm.ToolCall{toolCall("c1", "cat", `{"path":"README.md"}`)}},
+		oversized,
+	}
+	pruned, err := pruneMessages(messages, nil)
+	if err != nil {
+		t.Fatalf("pruneMessages failed: %v", err)
+	}
+	if pruned[0].Role != "system" || pruned[1].Content != user.Content {
+		t.Fatalf("system prompt and current request must be retained: %+v", pruned[:2])
+	}
+	for _, message := range pruned {
+		if message.Content == "an older answer" {
+			t.Fatal("redundant earlier assistant text must be dropped")
+		}
+		if message.Role == "tool" && len(message.Content) > maxToolResultBytes+32 {
+			t.Fatalf("oversized tool result was not truncated: %d bytes", len(message.Content))
 		}
 	}
-	if !found {
-		t.Fatalf("list_files not in tools: %v", tools)
+	if _, err := pruneMessages(nil, nil); err == nil {
+		t.Fatal("expected an empty conversation to be rejected")
 	}
-
-	// tools/call routes through the MCP protocol.
-	dispatcher := &mcpDispatcher{client: mcpCli}
-	call := toolCall{
-		ID:   "test-call-1",
-		Type: "function",
-		Function: toolFunction{
-			Name:      "run_coreutil",
-			Arguments: map[string]any{"utility": "cat", "stdin": "hello from MCP\n"},
-		},
-	}
-	output := dispatcher.Execute(context.Background(), call)
-	if !strings.Contains(output, "hello from MCP") {
-		t.Fatalf("unexpected output: %s", output)
+	huge := []llm.Message{system, {Role: "user", Content: strings.Repeat("x", 64<<10)}}
+	if _, err := pruneMessages(huge, nil); err == nil {
+		t.Fatal("expected an oversized request to be rejected")
 	}
 }
 
-func TestMCPPlanModeDeniesMutationViaMCP(t *testing.T) {
-	root := t.TempDir()
-	ws, err := workspace.New(root, workspace.DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := mcp.Config{
-		Workspace: ws,
-		Policy:    &approval.Policy{PlanMode: true, Interactive: false},
-	}
-	mcpCli, stop, err := startInProcessMCP(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer stop()
-
-	dispatcher := &mcpDispatcher{client: mcpCli}
-	call := toolCall{
-		ID:   "test-deny-1",
-		Type: "function",
-		Function: toolFunction{
-			Name:      "write_file",
-			Arguments: map[string]any{"path": "x.txt", "content": "hello"},
-		},
-	}
-	output := dispatcher.Execute(context.Background(), call)
-	if !strings.Contains(output, "plan_mode_denied") {
-		t.Fatalf("expected plan_mode_denied, got: %s", output)
-	}
-}
-
-func TestPersistResultCreatesDirectoryAndFile(t *testing.T) {
-	dir := t.TempDir()
-	outDir := dir + "/nested/output"
-	result := RunResult{SessionID: "test-session-01", Answer: "hello"}
-	if err := persistResult(outDir, "test-session-01", result); err != nil {
-		t.Fatalf("persistResult error: %v", err)
-	}
-	data, err := os.ReadFile(outDir + "/test-session-01.json")
-	if err != nil {
-		t.Fatalf("read result file: %v", err)
-	}
-	var got RunResult
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-	if got.SessionID != "test-session-01" {
-		t.Fatalf("session id = %q", got.SessionID)
-	}
-	if got.Answer != "hello" {
-		t.Fatalf("answer = %q", got.Answer)
-	}
-}
-
-func TestPersistResultUsesDefaultDirWhenEmpty(t *testing.T) {
-	// Verify that DefaultOutputDir has the documented value; any change to the
-	// constant would break the documented default path.
-	if DefaultOutputDir != "output" {
-		t.Fatalf("DefaultOutputDir = %q, want \"output\"", DefaultOutputDir)
+func TestConfigValidate(t *testing.T) {
+	workspace := t.TempDir()
+	base := Config{LlamaURL: "http://127.0.0.1:8080", Model: "local-qwen2.5", MCPCommand: "./bin/coreutils-mcp", Workspace: workspace, Prompt: "hi"}
+	valid := base
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("expected a valid configuration: %v", err)
 	}
 
-	// Verify that an empty outputDir falls back to DefaultOutputDir by passing
-	// an explicit temp path equivalent to the resolved default.
-	dir := t.TempDir()
-	explicitDefault := dir + "/" + DefaultOutputDir
-	result := RunResult{SessionID: "default-dir-test", Answer: "ok"}
-	if err := persistResult(explicitDefault, "default-dir-test", result); err != nil {
-		t.Fatalf("persistResult error: %v", err)
+	missingURL := base
+	missingURL.LlamaURL = "127.0.0.1:8080"
+	if err := missingURL.Validate(); err == nil {
+		t.Fatal("expected a non-http URL to be rejected")
 	}
-	if _, err := os.Stat(explicitDefault + "/default-dir-test.json"); err != nil {
-		t.Fatalf("expected file in default dir: %v", err)
+	missingPrompt := base
+	missingPrompt.Prompt = "  "
+	if err := missingPrompt.Validate(); err == nil {
+		t.Fatal("expected a missing prompt to be rejected")
 	}
-}
-
-func TestRunHeadlessPreservesPersistenceOnRequiredWriteFailure(t *testing.T) {
-	// Simulates the reported failure mode: the moderator plans and executes a
-	// write to the wrong file, then a repair plan still fails to satisfy the
-	// required write, so the run must fail rather than report success.
-	var requestCount int
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requestCount++
-		var payload chatRequest
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		if payload.ToolChoice != "none" {
-			t.Fatalf("request %d tool_choice = %#v", requestCount, payload.ToolChoice)
-		}
-		switch requestCount {
-		case 1:
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"use_tools\",\"tool_calls\":[{\"name\":\"write_file\",\"arguments\":{\"path\":\"other.txt\",\"content\":\"wrong\"}}]}"}}]}`)
-		case 2:
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"answer\",\"reason\":\"nothing more to do\"}"}}]}`)
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
-		}
-	}))
-	defer server.Close()
-
-	t.Setenv("OPENAI_API_KEY", "token")
-	t.Setenv("OPENAI_MODEL", "test-model")
-	t.Setenv("OPENAI_BASE_URL", server.URL)
-
-	workspaceRoot := t.TempDir()
-	outputDir := filepath.Join(t.TempDir(), "results")
-	result, err := RunHeadless(context.Background(), "write time.txt", Options{
-		WorkspacePath: workspaceRoot,
-		Yolo:          true,
-		RequireWrite:  []string{"time.txt"},
-		OutputDir:     outputDir,
-	})
-	if err == nil {
-		t.Fatal("expected error")
+	missingWorkspace := base
+	missingWorkspace.Workspace = filepath.Join(workspace, "missing")
+	if err := missingWorkspace.Validate(); err == nil {
+		t.Fatal("expected a missing workspace to be rejected")
 	}
-	if err.Error() != "required write was not completed: time.txt" {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(result.Answer, "Files changed: other.txt") {
-		t.Fatalf("answer missing verified changed file: %q", result.Answer)
-	}
-	if !strings.Contains(result.Answer, "Unmet required writes: time.txt") {
-		t.Fatalf("answer missing unmet required write: %q", result.Answer)
-	}
-	if len(result.Events) == 0 || result.Events[0].Path != "other.txt" || !result.Events[0].Success {
-		t.Fatalf("unexpected events: %+v", result.Events)
-	}
-	resultPath := filepath.Join(outputDir, result.SessionID+".json")
-	if _, statErr := os.Stat(resultPath); statErr != nil {
-		t.Fatalf("expected persisted result: %v", statErr)
-	}
-	data, readErr := os.ReadFile(resultPath)
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	var persisted RunResult
-	if err := json.Unmarshal(data, &persisted); err != nil {
-		t.Fatal(err)
-	}
-	if persisted.Answer != result.Answer || len(persisted.Events) != len(result.Events) {
-		t.Fatalf("unexpected persisted result: %+v", persisted)
-	}
-	sessionPath := filepath.Join(workspaceRoot, session.SessionsDir, result.SessionID+".jsonl")
-	if _, statErr := os.Stat(sessionPath); statErr != nil {
-		t.Fatalf("expected persisted session: %v", statErr)
-	}
-}
-
-func TestRunHeadlessWithoutRequireWritePreservesExistingBehavior(t *testing.T) {
-	var requestCount int
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"answer\"}"}}]}`)
-		case 2:
-			_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
-		}
-	}))
-	defer server.Close()
-
-	t.Setenv("OPENAI_API_KEY", "token")
-	t.Setenv("OPENAI_MODEL", "test-model")
-	t.Setenv("OPENAI_BASE_URL", server.URL)
-
-	result, err := RunHeadless(context.Background(), "say hello", Options{
-		WorkspacePath: t.TempDir(),
-		OutputDir:     filepath.Join(t.TempDir(), "results"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Answer != "done" {
-		t.Fatalf("answer = %q", result.Answer)
-	}
-	if requestCount != 2 {
-		t.Fatalf("request count = %d", requestCount)
-	}
-}
-
-// TestRunHeadlessModeratorDateOnlyPlanCannotClaimWriteCompleted reproduces
-// the originally reported failure: a plan that only reads the date via
-// run_coreutil, without ever calling write_file, must not be able to report
-// time.txt as written. Both the initial plan and the repair plan omit the
-// write, so the run must fail with the required-write error and the verified
-// report must not list time.txt as changed.
-func TestRunHeadlessModeratorDateOnlyPlanCannotClaimWriteCompleted(t *testing.T) {
-	var requestCount int
-	dateOnlyPlan := `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"use_tools\",\"tool_calls\":[{\"name\":\"run_coreutil\",\"arguments\":{\"utility\":\"date\",\"args\":[\"+%Y-%m-%d\"]}}]}"}}]}`
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requestCount++
-		switch requestCount {
-		case 1, 2:
-			_, _ = io.WriteString(writer, dateOnlyPlan)
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
-		}
-	}))
-	defer server.Close()
-
-	t.Setenv("OPENAI_API_KEY", "token")
-	t.Setenv("OPENAI_MODEL", "test-model")
-	t.Setenv("OPENAI_BASE_URL", server.URL)
-
-	result, err := RunHeadless(context.Background(), "obtain the current date and store it in time.txt", Options{
-		WorkspacePath: t.TempDir(),
-		Yolo:          true,
-		RequireWrite:  []string{"time.txt"},
-		OutputDir:     filepath.Join(t.TempDir(), "results"),
-	})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if err.Error() != "required write was not completed: time.txt" {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if strings.Contains(result.Answer, "Files changed: time.txt") {
-		t.Fatalf("answer falsely claims time.txt was written: %q", result.Answer)
-	}
-	if !strings.Contains(result.Answer, "Unmet required writes: time.txt") {
-		t.Fatalf("answer missing unmet required write: %q", result.Answer)
-	}
-	if !strings.Contains(result.Answer, "Commands run: run_coreutil") {
-		t.Fatalf("answer missing verified command: %q", result.Answer)
-	}
-	for _, event := range result.Events {
-		if event.Tool == "write_file" {
-			t.Fatalf("unexpected write_file event recorded for a date-only plan: %+v", event)
-		}
-	}
-}
-
-// TestRunHeadlessModeratorSuccessfulWriteFileFlow verifies that when the
-// moderator plans and successfully executes a write_file call matching an
-// accepted require_writes entry, the run succeeds and the verified report
-// reflects the actual write.
-func TestRunHeadlessModeratorSuccessfulWriteFileFlow(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"use_tools\",\"reason\":\"write the date to time.txt\",\"tool_calls\":[{\"name\":\"write_file\",\"arguments\":{\"path\":\"time.txt\",\"content\":\"2026-09-04\\n\"}}],\"require_writes\":[\"time.txt\"]}"}}]}`)
-	}))
-	defer server.Close()
-
-	t.Setenv("OPENAI_API_KEY", "token")
-	t.Setenv("OPENAI_MODEL", "test-model")
-	t.Setenv("OPENAI_BASE_URL", server.URL)
-
-	workspaceRoot := t.TempDir()
-	result, err := RunHeadless(context.Background(), "store the current date in time.txt", Options{
-		WorkspacePath: workspaceRoot,
-		Yolo:          true,
-		OutputDir:     filepath.Join(t.TempDir(), "results"),
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(result.Answer, "Files changed: time.txt") {
-		t.Fatalf("answer missing verified changed file: %q", result.Answer)
-	}
-	if strings.Contains(result.Answer, "Unmet required writes") {
-		t.Fatalf("answer should not list unmet required writes: %q", result.Answer)
-	}
-	data, readErr := os.ReadFile(filepath.Join(workspaceRoot, "time.txt"))
-	if readErr != nil {
-		t.Fatalf("expected time.txt to exist: %v", readErr)
-	}
-	if string(data) != "2026-09-04\n" {
-		t.Fatalf("time.txt content = %q", string(data))
-	}
-}
-
-// TestRunHeadlessModeratorRejectsUnknownTool ensures a plan that requests a
-// tool outside the allow-list is rejected rather than executed, even after
-// one corrective retry.
-func TestRunHeadlessModeratorRejectsUnknownTool(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"use_tools\",\"tool_calls\":[{\"name\":\"delete_everything\",\"arguments\":{}}]}"}}]}`)
-	}))
-	defer server.Close()
-
-	t.Setenv("OPENAI_API_KEY", "token")
-	t.Setenv("OPENAI_MODEL", "test-model")
-	t.Setenv("OPENAI_BASE_URL", server.URL)
-
-	_, err := RunHeadless(context.Background(), "delete everything", Options{
-		WorkspacePath: t.TempDir(),
-		Yolo:          true,
-		OutputDir:     filepath.Join(t.TempDir(), "results"),
-	})
-	if err == nil {
-		t.Fatal("expected error for unknown tool plan")
-	}
-	if !strings.Contains(err.Error(), "moderator planning failed") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-// TestRunHeadlessModeratorRejectsFreeFormPlan ensures free-form prose instead
-// of a JSON plan is rejected rather than executed or treated as an answer.
-func TestRunHeadlessModeratorRejectsFreeFormPlan(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"Sure! I will go ahead and do that for you now."}}]}`)
-	}))
-	defer server.Close()
-
-	t.Setenv("OPENAI_API_KEY", "token")
-	t.Setenv("OPENAI_MODEL", "test-model")
-	t.Setenv("OPENAI_BASE_URL", server.URL)
-
-	_, err := RunHeadless(context.Background(), "do something", Options{
-		WorkspacePath: t.TempDir(),
-		OutputDir:     filepath.Join(t.TempDir(), "results"),
-	})
-	if err == nil {
-		t.Fatal("expected error for free-form plan response")
-	}
-	if !strings.Contains(err.Error(), "moderator planning failed") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-// TestRunHeadlessModeratorStopsDispatchAfterDeniedCall ensures that when a
-// plan contains multiple tool_calls and an earlier one is denied by policy,
-// later calls in the same plan are never dispatched.
-func TestRunHeadlessModeratorStopsDispatchAfterDeniedCall(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		_, _ = io.WriteString(writer, `{"choices":[{"message":{"role":"assistant","content":"{\"decision\":\"use_tools\",\"tool_calls\":[{\"name\":\"write_file\",\"arguments\":{\"path\":\"first.txt\",\"content\":\"a\"}},{\"name\":\"write_file\",\"arguments\":{\"path\":\"second.txt\",\"content\":\"b\"}}]}"}}]}`)
-	}))
-	defer server.Close()
-
-	t.Setenv("OPENAI_API_KEY", "token")
-	t.Setenv("OPENAI_MODEL", "test-model")
-	t.Setenv("OPENAI_BASE_URL", server.URL)
-
-	workspaceRoot := t.TempDir()
-	// No --yolo and non-interactive: mutations are denied instead of prompted.
-	result, err := RunHeadless(context.Background(), "write two files", Options{
-		WorkspacePath: workspaceRoot,
-		OutputDir:     filepath.Join(t.TempDir(), "results"),
-	})
-	if err == nil {
-		t.Fatal("expected error for denied mutation")
-	}
-	if err.Error() != "approval_required_non_interactive" {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(result.Events) != 1 {
-		t.Fatalf("expected exactly one recorded event (dispatch must stop after the denial), got %+v", result.Events)
-	}
-	if _, statErr := os.Stat(filepath.Join(workspaceRoot, "first.txt")); statErr == nil {
-		t.Fatal("first.txt should not have been written")
-	}
-	if _, statErr := os.Stat(filepath.Join(workspaceRoot, "second.txt")); statErr == nil {
-		t.Fatal("second.txt should not have been dispatched after the first call was denied")
-	}
-}
-
-type recordingDispatcher struct {
-	calls []toolCall
-}
-
-func (d *recordingDispatcher) Execute(_ context.Context, call toolCall) string {
-	d.calls = append(d.calls, call)
-	return `{"success":true}`
-}
-
-func TestMCPRunTestsAllowedInPlanModeViaMCP(t *testing.T) {
-	// run_tests is a dedicated validation tool: it must run even in plan mode
-	// and without --yolo, since it is never treated as a mutation.
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module runtestsfixture\n\ngo 1.21\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	testFile := "package runtestsfixture\n\nimport \"testing\"\n\nfunc TestOK(t *testing.T) {}\n"
-	if err := os.WriteFile(filepath.Join(root, "fixture_test.go"), []byte(testFile), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	ws, err := workspace.New(root, workspace.DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := mcp.Config{
-		Workspace: ws,
-		Policy:    &approval.Policy{PlanMode: true, Interactive: false},
-	}
-	mcpCli, stop, err := startInProcessMCP(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer stop()
-
-	dispatcher := &mcpDispatcher{client: mcpCli}
-	call := toolCall{
-		ID:   "test-run-tests-1",
-		Type: "function",
-		Function: toolFunction{
-			Name:      "run_tests",
-			Arguments: map[string]any{},
-		},
-	}
-	output := dispatcher.Execute(context.Background(), call)
-	if strings.Contains(output, "plan_mode_denied") {
-		t.Fatalf("run_tests must not be denied in plan mode: %s", output)
-	}
-	if !strings.Contains(output, `"success":true`) {
-		t.Fatalf("expected success result: %s", output)
-	}
-}
-
-func TestBaseSystemPromptMentionsRunTestsWorkflow(t *testing.T) {
-	for _, want := range []string{"run_tests", "apply_patch", "write_file", "git_diff"} {
-		if !strings.Contains(baseSystemPrompt, want) {
-			t.Fatalf("baseSystemPrompt missing %q: %s", want, baseSystemPrompt)
-		}
+	missingCommand := base
+	missingCommand.MCPCommand = ""
+	if err := missingCommand.Validate(); err == nil {
+		t.Fatal("expected a missing MCP command to be rejected")
 	}
 }
