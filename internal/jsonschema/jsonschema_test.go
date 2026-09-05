@@ -45,6 +45,8 @@ func TestValidateRawRejectsInvalidArguments(t *testing.T) {
 		"above maximum":    `{"path":"a.txt","lines":10000}`,
 		"non integer":      `{"path":"a.txt","lines":1.5}`,
 		"invalid enum":     `{"path":"a.txt","mode":"c"}`,
+		"object enum":      `{"path":"a.txt","mode":{"k":"v"}}`,
+		"array enum":       `{"path":"a.txt","mode":["a"]}`,
 		"non boolean":      `{"path":"a.txt","flag":"yes"}`,
 		"too many items":   `{"path":"a.txt","fields":[1,2,3]}`,
 		"invalid item":     `{"path":"a.txt","fields":["x"]}`,

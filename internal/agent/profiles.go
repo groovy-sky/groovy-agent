@@ -41,9 +41,10 @@ var profiles = []struct {
 	{
 		// PLAN.md lists seven text-processing tools; the per-request limit is
 		// six, so "paste" is dropped in favour of the tools needed by the
-		// acceptance tests.
+		// acceptance tests. Its keywords are omitted as well so a request can
+		// never select this profile for a capability it cannot reach.
 		profile:  Profile{Name: "text_processing", Tools: []string{"sort", "uniq", "wc", "cut", "tr", "base64"}},
-		keywords: []string{"sort", "unique", "uniq", "duplicate", "base64", "encode", "decode", "translate characters", "fields", "column", "columns", "cut", "merge lines"},
+		keywords: []string{"sort", "unique", "uniq", "duplicate", "base64", "encode", "decode", "translate characters", "fields", "column", "columns", "cut"},
 	},
 }
 

@@ -35,8 +35,8 @@ type Client struct {
 	closeOnce sync.Once
 }
 
-// New wires a client to an already established transport. stop is invoked once
-// during Close after the streams are closed.
+// New wires a client to an already established transport. During Close the
+// writer is closed, then stop is invoked, then the reader is closed.
 func New(reader io.ReadCloser, writer io.WriteCloser, stop func()) *Client {
 	client := &Client{
 		writer:   writer,

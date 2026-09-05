@@ -157,7 +157,22 @@ func equal(left, right any) bool {
 	if leftOK && rightOK {
 		return leftNumber == rightNumber
 	}
+	if !comparable(left) || !comparable(right) {
+		// Objects and arrays are never enum members in the supported subset,
+		// and comparing them directly would panic.
+		return false
+	}
 	return left == right
+}
+
+// comparable reports whether a decoded JSON value can be compared with ==.
+func comparable(value any) bool {
+	switch value.(type) {
+	case nil, bool, string, float64, int, json.Number:
+		return true
+	default:
+		return false
+	}
 }
 
 // numberOf converts the numeric JSON representations used by encoding/json
