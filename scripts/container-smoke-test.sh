@@ -4,12 +4,11 @@
 # This validates packaging/wiring regressions without requiring model
 # inference or downloading the GGUF model at test runtime:
 #
-#   1. The compiled `/usr/local/bin/groovy-agent` binary is present in the
-#      final image and its built-in `date` coreutil works.
+#   1. The compiled `/usr/local/bin/groovy-agent` and
+#      `/usr/local/bin/coreutils-mcp` binaries are present in the final image.
 #   2. `docker/entrypoint.sh` starts llama-server, waits for it to become
 #      healthy, and forwards the container command to `groovy-agent`
-#      correctly -- both when the first argument is already `run`/`agent`
-#      and when it needs to be prepended with `agent`.
+#      with the bundled MCP server configured.
 #
 # Test 2 replaces `llama-server` and `groovy-agent` inside the container with
 # small deterministic stubs (a Python HTTP server that answers /health, and a
@@ -42,13 +41,10 @@ DOCKER_BUILDKIT=1 "$CONTAINER_ENGINE" build \
   -t "$IMAGE_NAME" \
   "$ROOT_DIR"
 
-echo "==> Verifying compiled binary + built-in 'date' coreutil"
-date_output="$("$CONTAINER_ENGINE" run --rm --entrypoint /usr/local/bin/groovy-agent "$IMAGE_NAME" date -u +%Y-%m-%dT%H:%M:%SZ)"
-if ! [[ "$date_output" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
-  echo "FAIL: unexpected 'date' coreutil output: $date_output" >&2
-  exit 1
-fi
-echo "    date coreutil OK: $date_output"
+echo "==> Verifying compiled binaries"
+"$CONTAINER_ENGINE" run --rm --entrypoint /bin/sh "$IMAGE_NAME" -c \
+  'test -x /usr/local/bin/groovy-agent && test -x /usr/local/bin/coreutils-mcp'
+echo "    groovy-agent and coreutils-mcp binaries OK"
 
 mkdir -p "$WORK_DIR/output"
 
@@ -117,17 +113,19 @@ run_forwarding_case() {
   echo "    forwarded argv: $(tr '\n' ' ' < "$WORK_DIR/output/forward-log.txt")"
 }
 
-# Case 1: first argument is already "run" -> forwarded verbatim.
-run_forwarding_case "explicit 'run' subcommand" run -p "test" --workspace /output --yolo
-if ! head -n1 "$WORK_DIR/output/forward-log.txt" | grep -qx "run"; then
-  echo "FAIL: expected 'run' as first forwarded argument" >&2
+# The entrypoint provides container defaults before user-supplied agent flags and
+# prompt arguments.
+run_forwarding_case "agent defaults plus prompt" --workspace /output "test prompt"
+if ! grep -qx -- "--mcp-command" "$WORK_DIR/output/forward-log.txt"; then
+  echo "FAIL: expected bundled MCP command flag" >&2
   exit 1
 fi
-
-# Case 2: bare flags -> entrypoint prepends "agent".
-run_forwarding_case "bare flags requiring 'agent' prefix" --workspace /output --yolo
-if ! head -n1 "$WORK_DIR/output/forward-log.txt" | grep -qx "agent"; then
-  echo "FAIL: expected 'agent' to be prepended to forwarded arguments" >&2
+if ! grep -qx -- "/usr/local/bin/coreutils-mcp" "$WORK_DIR/output/forward-log.txt"; then
+  echo "FAIL: expected bundled MCP command path" >&2
+  exit 1
+fi
+if ! tail -n1 "$WORK_DIR/output/forward-log.txt" | grep -qx "test prompt"; then
+  echo "FAIL: expected prompt to be forwarded" >&2
   exit 1
 fi
 

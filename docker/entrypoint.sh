@@ -104,14 +104,14 @@ export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://${LLAMA_SERVER_HOST}:${LLAMA_S
 export OPENAI_MODEL="${OPENAI_MODEL:-$LLAMA_MODEL_NAME}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-local-llama}"
 
-# Forward subcommand: if the first argument is "agent" or "run", pass all args
-# directly. Otherwise prepend "agent" so bare extra flags (like --workspace)
-# still reach agent mode.
-if [[ "${1:-}" == "agent" || "${1:-}" == "run" ]]; then
-  /usr/local/bin/groovy-agent "$@" <&3 &
-else
-  /usr/local/bin/groovy-agent agent "$@" <&3 &
-fi
+agent_args=(
+  --llama-url "http://${LLAMA_SERVER_HOST}:${LLAMA_SERVER_PORT}"
+  --model "$LLAMA_MODEL_NAME"
+  --mcp-command /usr/local/bin/coreutils-mcp
+  "$@"
+)
+
+/usr/local/bin/groovy-agent "${agent_args[@]}" <&3 &
 agent_pid=$!
 
 while true; do
