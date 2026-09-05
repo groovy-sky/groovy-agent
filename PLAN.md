@@ -1,4 +1,4 @@
-# PLAN.md — Local Qwen2.5 MCP Agent in Go
+# PLAN.md — Local Phi-4-mini-instruct MCP Agent in Go
 
 ## Goal
 
@@ -7,7 +7,7 @@ Build a resource-efficient Go CLI agent that:
 1. Connects to a local `llama-server`.
 2. Starts the repository's `coreutils` MCP server over stdio.
 3. Discovers and filters its tools.
-4. Sends selected tool definitions to Qwen2.5.
+4. Sends selected tool definitions to Phi-4-mini-instruct.
 5. Executes validated tool calls through MCP.
 6. Returns bounded tool results to the model.
 7. Prints the final answer.
@@ -32,7 +32,7 @@ User
   ▼
 Go CLI agent
   ├── HTTP ─────► llama-server
-  │               Qwen2.5 Instruct GGUF
+  │               Phi-4-mini-instruct GGUF
   │
   └── stdio ────► coreutils MCP server
 ```
@@ -55,9 +55,9 @@ The Go agent owns:
 Use this default profile:
 
 ```text
-Model:        Qwen2.5-1.5B-Instruct
+Model:        Phi-4-mini-instruct
 Format:       GGUF
-Quantization: Q4_K_M
+Quantization: Q8_0
 Context:      4096 tokens
 Concurrency:  1
 ```
@@ -66,7 +66,7 @@ Start `llama-server` with:
 
 ```bash
 llama-server \
-  -m /models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
+  -m /models/Phi-4-mini-instruct.Q8_0.gguf \
   --host 127.0.0.1 \
   --port 8080 \
   --threads 4 \
@@ -84,8 +84,8 @@ If the machine swaps or becomes unresponsive:
 3. reduce batch size to 64;
 4. reduce the number of exposed tools.
 
-Qwen2.5-3B-Instruct Q4_K_M may be evaluated later, but it is not the default
-for an 8 GB machine.
+Larger quantizations or alternative Phi-4-mini variants may be evaluated
+later, but Q8_0 is the default for an 8 GB machine.
 
 ---
 
@@ -554,7 +554,7 @@ Do not log:
 
 ### 1. Model baseline
 
-Verify that Qwen2.5-1.5B-Instruct Q4_K_M:
+Verify that Phi-4-mini-instruct Q8_0:
 
 - loads without sustained swapping;
 - produces normal chat responses;

@@ -101,7 +101,7 @@ run_forwarding_case() {
     --name "$CONTAINER_NAME" \
     -v "$WORK_DIR/stub-llama-server:/opt/llama/llama-server:ro" \
     -v "$WORK_DIR/stub-groovy-agent:/usr/local/bin/groovy-agent:ro" \
-    -v "$WORK_DIR/fake-model.gguf:/models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf:ro" \
+    -v "$WORK_DIR/fake-model.gguf:/models/Phi-4-mini-instruct.Q8_0.gguf:ro" \
     -v "$WORK_DIR/output:/output" \
     -e LLAMA_STARTUP_TIMEOUT=15 \
     "$IMAGE_NAME" "$@"

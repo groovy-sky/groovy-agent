@@ -1,108 +1,235 @@
 # groovy-agent
 
-A modern, dependency-free Go implementation of common coreutils, exposed as
-tools over the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/).
-The project takes inspiration from
-[`guonaihong/coreutils`](https://github.com/guonaihong/coreutils), while using
-the current Go standard library and a stream-oriented API.
+A minimal, reliable Go agent that answers a single prompt using a local
+[`llama.cpp`](https://github.com/ggml-org/llama.cpp) `llama-server` and a
+bounded set of **read-only coreutils tools** exposed over the
+[Model Context Protocol (MCP)](https://modelcontextprotocol.io/).
 
-## Utilities
+The design intentionally has no non-coreutils integrations: no network
+fetch, no browser, no GitHub/cloud APIs, no package management, no shell
+string execution, and no file-write tools. See
+[Architecture](#architecture) and [Security boundaries](#security-boundaries)
+below for the exact guarantees.
 
-`base64`, `basename`, `cat`, `cp`, `cut`, `date`, `dirname`, `grep`, `head`,
-`link`, `mkdir`, `paste`, `pwd`, `rmdir`, `sha256sum`, `sort`, `tail`, `tee`,
-`touch`, `tr`, `uniq`, `unlink`, and `wc`.
+## Model
 
-Each MCP tool accepts optional `args` (an array of command arguments) and
-`stdin` (a string). File operands are resolved relative to the server process.
-Tool output is limited to 4 MiB and in-memory input used by utilities such as
-`wc`, `tac`, and `tail` is bounded.
+The bundled/default model is
+[`Phi-4-mini-instruct.Q8_0.gguf`](https://huggingface.co/unsloth/Phi-4-mini-instruct-GGUF/blob/main/Phi-4-mini-instruct.Q8_0.gguf)
+from `unsloth/Phi-4-mini-instruct-GGUF`, served locally by `llama-server`.
+The GGUF file is **never committed to git**; it is downloaded at
+build/run time (see below).
 
-## Build and test
+## Architecture
 
-Go 1.24 or newer is required.
+```text
+User prompt
+   │
+   ▼
+Go CLI agent (cmd/agent)
+   ├── HTTP  ─────► llama-server (OpenAI-compatible /v1/chat/completions)
+   │                Phi-4-mini-instruct GGUF, llama.cpp
+   │
+   └── stdio ────► coreutils MCP server (cmd/coreutils-mcp)
+```
+
+The agent (`internal/agent`):
+
+1. Validates configuration (workspace must exist; URLs must be http/https).
+2. Connects to `llama-server` and to the coreutils MCP server (a child
+   process started over stdio).
+3. Performs MCP `initialize` / `tools/list` and keeps only tools on the
+   built-in allowlist (`internal/agent/agent.go: AllowedTools`); anything
+   else the MCP server might advertise is logged and rejected.
+4. Picks a small, deterministic tool profile for the prompt
+   (`internal/agent/profiles.go`) so only a handful of relevant tool
+   schemas are sent to the model at once (max 6).
+5. Runs a bounded loop (at most 3 model rounds, 5 total tool calls): the
+   model may request tool calls, the agent validates and executes them
+   through MCP, and bounded results are fed back until the model returns a
+   final answer or the round budget is spent.
+6. Prints the final answer to stdout; all diagnostics go to stderr.
+
+There is no shell execution, no free-form command string, no write/mutate
+tools, and no long-running session state. Each run answers exactly one
+prompt and exits.
+
+## Supported MCP tools
+
+The coreutils MCP server (`internal/mcpserver`) exposes exactly these
+read-only tools, each with a strict JSON-schema argument shape
+(`additionalProperties: false`, bounded string/array lengths):
+
+| Tool        | Purpose                                             |
+|-------------|------------------------------------------------------|
+| `pwd`       | Print the logical workspace path                      |
+| `date`      | Print the current date/time (optionally UTC)          |
+| `cat`       | Read a bounded prefix of a workspace text file         |
+| `head`      | Read the first N lines of a workspace file             |
+| `tail`      | Read the last N lines of a workspace file               |
+| `wc`        | Count lines/words/bytes of a file or supplied text      |
+| `grep`      | Search a workspace file for a pattern (bounded matches)  |
+| `sha256sum` | Compute the SHA-256 digest of a workspace file          |
+| `basename`  | Strip directory/suffix from a path (string op, no I/O)  |
+| `dirname`   | Strip the last path component (string op, no I/O)       |
+| `base64`    | Encode/decode base64 text                                |
+| `cut`       | Select delimiter-separated fields from text              |
+| `paste`     | Merge several texts line by line                         |
+| `sort`      | Sort lines of supplied text                              |
+| `tr`        | Translate/delete characters in text                      |
+| `uniq`      | Remove adjacent duplicate lines                          |
+
+Only a subset of the above (`AllowedTools` in `internal/agent/agent.go`) is
+ever exposed to the model, and only a profile-selected slice (≤6 tools) is
+sent per request. Write-capable coreutils
+(`cp`, `link`, `mkdir`, `rmdir`, `tee`, `touch`, `unlink`) are **not
+implemented** by the server at all (`mcpserver.WriteCapableTools` documents
+this policy so it is explicit and tested).
+
+## Security boundaries
+
+- **No shell execution.** Every tool is a Go function operating on parsed,
+  schema-validated arguments; there is no `sh -c`, `exec.Command` with a
+  shell, or string concatenation into a command line anywhere in the tool
+  dispatch path.
+- **Workspace confinement.** All file tools resolve paths through
+  `internal/mcpserver/workspace.go`, which:
+  - rejects empty paths, NUL bytes, and absolute paths;
+  - rejects `..` traversal before and after `filepath.Clean`;
+  - resolves symlinks and re-checks the result stays inside the canonical,
+    symlink-resolved workspace root (blocking symlink escapes);
+  - reports safe, generic errors (no host path leakage).
+- **Bounded I/O.** File reads, hash inputs, grep matches, and tool results
+  all have fixed byte/line caps (`internal/mcpserver/server.go:
+  DefaultLimits`), so a single tool call cannot exhaust memory or the
+  model's context.
+- **Allowlist, not trust-the-server.** The agent filters MCP `tools/list`
+  results against its own hard-coded `AllowedTools`, so even if the MCP
+  server were modified or replaced, the agent will not send unexpected
+  tool schemas to the model or execute unexpected tool calls.
+- **Local-only inference.** `llama-server` is only reachable via
+  `--llama-url`, which must be an `http://` or `https://` URL; the
+  container/entrypoint wires this to `127.0.0.1` by default and never
+  forwards it to an external API.
+- **No mutation tools.** There is no `write_file`, `apply_patch`,
+  `exec_command`, or arbitrary command runner in this design.
+
+## Prerequisites
+
+- Go 1.24 or newer (for building/testing the Go binaries directly).
+- Docker (or Podman) with BuildKit, if you want the containerized stack
+  that bundles `llama-server`.
+- `curl`, for the model download script.
+- ~4.5 GB disk space for `Phi-4-mini-instruct.Q8_0.gguf`, plus the
+  Docker image layers if using the container.
+
+## Build and test (Go only)
 
 ```sh
-go test ./...
+go build ./...
 go vet ./...
-go build -o groovy-agent ./cmd/agent
+go test ./...
 ```
+
+This builds two binaries from `cmd/`:
+
+- `cmd/agent` → the CLI agent (`groovy-agent`)
+- `cmd/coreutils-mcp` → the standalone coreutils MCP server
 
 The implementation has no third-party runtime or build dependencies.
 
-## Dockerized local agent stack (groovy-agent + llama.cpp)
-
-This repository includes a self-contained Docker runtime that starts:
-
-1. `llama.cpp` `llama-server` (OpenAI-compatible API on `:8080`)
-2. `groovy-agent`, configured to call that local API by default
-
-Inside the container:
-
-- `OPENAI_BASE_URL` defaults to `http://127.0.0.1:8080/v1`
-- `OPENAI_MODEL` defaults to `Qwen2.5-Coder-7B-Instruct-Q4_K_M`
-- `OPENAI_API_KEY` defaults to `local-llama` (override if needed)
-- `OPENAI_REQUEST_TIMEOUT` defaults to `3h`
-
-The agent exposes a safe coding toolset (workspace-confined file read/write,
-bounded search/listing, fixed `git status`/`git diff` helpers, `run_coreutil`,
-`exec_command`, and a dedicated `run_tests` validation tool). `exec_command`
-runs an explicit executable + argument list inside the workspace (no shell
-interpolation). `run_tests` runs the repository's standard `go test ./...`
-command from the workspace root with a bounded timeout and a minimal child
-environment (it does not inherit the agent's full environment, so local
-model/API credentials are not exposed); it is intended for validating changes
-after edits and never requires mutation approval.
-
-### Requirements
-
-- Docker with BuildKit support (`docker build --secret ...`)
-- Disk:
-  - image build/runtime dependencies: several GB
-  - model file: ~4-5 GB (`Q4_K_M` GGUF)
-- RAM: CPU inference is practical with ~16 GB+, but more is better
-
-CPU-only inference can be slow. Tune with:
-
-- `LLAMA_THREADS` (default auto-detected)
-- `LLAMA_CTX_SIZE` (default `8192`)
-- `LLAMA_N_GPU_LAYERS` (default `0`, raise for GPU offload builds/runtimes)
-- `LLAMA_EXTRA_ARGS` (space-separated extra flags; avoid values containing spaces, and **never** source this from untrusted input)
-
-### Model provisioning (no GGUF committed to git)
-
-Download the exact model locally (supports optional `HF_TOKEN`):
+## Model download (no GGUF committed to git)
 
 ```sh
 ./scripts/download-model.sh
-# optional:
+# optional token for gated/rate-limited downloads:
 # HF_TOKEN=... ./scripts/download-model.sh
 ```
 
-This stores:
+This stores `artifacts/models/Phi-4-mini-instruct.Q8_0.gguf`. `*.gguf`
+files are ignored by git (see `.gitignore`).
 
-- `artifacts/models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf`
+## Running locally without Docker
 
-`*.gguf` is ignored by git.
+1. Download the model (above).
+2. Start `llama-server` yourself (from a local `llama.cpp` build or
+   release) pointed at the downloaded GGUF file, e.g.:
 
-### Build and package image artifact
+   ```sh
+   llama-server \
+     --host 127.0.0.1 --port 8080 \
+     --model artifacts/models/Phi-4-mini-instruct.Q8_0.gguf \
+     --alias Phi-4-mini-instruct \
+     --ctx-size 8192 --jinja
+   ```
 
-Create and export image tarball to `output/groovy-agent.tar`:
+3. Build the binaries and run the agent, pointing it at the MCP server
+   binary and a workspace directory:
 
-```sh
-./scripts/package-image.sh
-```
+   ```sh
+   go build -o bin/coreutils-mcp ./cmd/coreutils-mcp
+   go build -o bin/groovy-agent ./cmd/agent
+   ./bin/groovy-agent \
+     --llama-url http://127.0.0.1:8080 \
+     --model Phi-4-mini-instruct \
+     --mcp-command ./bin/coreutils-mcp \
+     --workspace . \
+     "what is the sha256sum of go.mod?"
+   ```
 
-Optional build-time model download (for environments where you want the model
-in-image and BuildKit secret auth):
+## Running the Docker image (llama.cpp + agent bundled)
+
+The `Dockerfile` builds both Go binaries, layers them on top of the
+official `llama.cpp` server image, and wires everything together with
+`docker/entrypoint.sh`, which starts `llama-server`, waits for it to
+become healthy, then execs `groovy-agent` with the bundled MCP server
+configured.
+
+### Build with the model baked into the image
 
 ```sh
 HF_TOKEN=... DOWNLOAD_MODEL_AT_BUILD=1 ./scripts/package-image.sh
 ```
 
+(`HF_TOKEN` is optional and only needed for gated/rate-limited downloads.)
+This produces a local image (`groovy-agent:local` by default) and saves a
+tarball to `output/groovy-agent.tar`.
+
+### Build without downloading the model (mount it instead)
+
+```sh
+DOCKER_BUILDKIT=1 docker build -t groovy-agent:local .
+```
+
+Then run with the host-downloaded model mounted read-only:
+
+```sh
+docker run --rm -it \
+  -v "$(pwd)/artifacts/models:/models:ro" \
+  -e LLAMA_MODEL_PATH=/models/Phi-4-mini-instruct.Q8_0.gguf \
+  -p 8080:8080 \
+  groovy-agent:local \
+  --workspace /output "what is today's date?"
+```
+
+### Output persistence
+
+Mount `/output` as the workspace when you want file-reading tools to see
+files written by the host:
+
+```sh
+docker run --rm \
+  -v "$(pwd)/artifacts/models:/models:ro" \
+  -v "$(pwd)/output:/output" \
+  -e LLAMA_MODEL_PATH=/models/Phi-4-mini-instruct.Q8_0.gguf \
+  -p 8080:8080 \
+  groovy-agent:local \
+  --workspace /output "summarize the first lines of README.md"
+```
+
 ### Container smoke test
 
-Validate the runtime image's packaging and `docker/entrypoint.sh` wiring without
-downloading a model or running real LLM inference:
+Validate the runtime image's packaging and `docker/entrypoint.sh` wiring
+without downloading a model or running real LLM inference:
 
 ```sh
 ./scripts/container-smoke-test.sh
@@ -110,385 +237,95 @@ downloading a model or running real LLM inference:
 
 This builds the `runtime` target with `DOWNLOAD_MODEL=0`, then checks:
 
-- the compiled `/usr/local/bin/groovy-agent` and `/usr/local/bin/coreutils-mcp`
-  binaries are present;
-- `docker/entrypoint.sh` starts llama-server, waits for it to become ready,
-  and forwards the container command to `groovy-agent` with the bundled MCP
-  server configured.
+- the compiled `/usr/local/bin/groovy-agent` and
+  `/usr/local/bin/coreutils-mcp` binaries are present;
+- `docker/entrypoint.sh` starts llama-server, waits for it to become
+  ready, and forwards the container command to `groovy-agent` with the
+  bundled MCP server configured.
 
-The forwarding checks replace `llama-server` and `groovy-agent` inside the
-container with deterministic stub scripts (a minimal HTTP server that answers
-`/health`, and a script that records its argv), so no model, GPU, or CPU
-inference is required and no llama-server port is ever published outside the
-container. Set `CONTAINER_ENGINE=podman` to run it with Podman instead of
-Docker.
+The forwarding checks replace `llama-server` and `groovy-agent` inside
+the container with deterministic stub scripts (a minimal HTTP server
+that answers `/health`, and a script that records its argv), so no
+model, GPU, or CPU inference is required and no llama-server port is
+ever published outside the container. Set `CONTAINER_ENGINE=podman` to
+run it with Podman instead of Docker.
 
-### Run the published image (Qwen2.5 model included)
+## Configuration / environment variables
 
-The `ghcr.io/groovy-sky/groovy-agent:qwen2_5` image bundles the Qwen2.5 model,
-so no host model mount or separate download step is required:
+Agent CLI flags (`cmd/agent`):
 
-```sh
-docker run --rm -it \
-  -p 8080:8080 \
-  ghcr.io/groovy-sky/groovy-agent:qwen2_5
-```
+- `--llama-url` (default `http://127.0.0.1:8080`): base URL of the local
+  `llama-server`; must be `http://` or `https://`.
+- `--model` (default `local-phi-4-mini-instruct`): model name advertised
+  to `llama-server`.
+- `--mcp-command` (default `./bin/coreutils-mcp`): path to the coreutils
+  MCP server executable.
+- `--workspace` (default `.`): directory that bounds every filesystem
+  operation performed by the MCP tools.
+- remaining arguments are joined as the prompt.
 
-The entrypoint starts `llama-server` and then launches `groovy-agent`.
-The llama.cpp API is available on `http://localhost:8080` while the container
-is running. The `--jinja` flag is passed to llama-server to enable Jinja-based
-chat templates, which improve tool prompting for Qwen2.5 models. Every user
-turn first goes through the moderator/planner (see
-[Moderator/planner architecture](#moderatorplanner-architecture) below),
-which requires the model to return one structured JSON plan before any tool
-executes; the underlying dispatch still accepts either native OpenAI
-`tool_calls` or a single standalone JSON tool-call envelope from the model, so
-local llama.cpp runs do not depend on `message.tool_calls` support alone.
-
-You can tune inference with the same environment variables documented below
-(`LLAMA_THREADS`, `LLAMA_CTX_SIZE`, `LLAMA_N_GPU_LAYERS`, etc.).
-
-**Run with `/output` as workspace:**
-
-```sh
-docker run --rm -it \
-  -v "$(pwd)/output:/output" \
-  -p 8080:8080 \
-  ghcr.io/groovy-sky/groovy-agent:qwen2_5 \
-  --workspace /output "store the current date in time.txt"
-```
-
-The entrypoint forwards all arguments to `groovy-agent` after configuring the
-local llama-server URL, model name, and bundled `/usr/local/bin/coreutils-mcp`
-server.
-
-### Run with host-mounted model (recommended)
-
-```sh
-docker run --rm -it \
-  -v "$(pwd)/artifacts/models:/models:ro" \
-  -e LLAMA_MODEL_PATH=/models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
-  -p 8080:8080 \
-  groovy-agent:local
-```
-
-The entrypoint starts `llama-server`, waits for readiness, then launches
-`groovy-agent`.
-
-### Output persistence
-
-Mount `/output` as the workspace when you want the agent to write files back to
-the host:
-
-```sh
-docker run --rm \
-  -v "$(pwd)/artifacts/models:/models:ro" \
-  -v "$(pwd)/output:/output" \
-  -e LLAMA_MODEL_PATH=/models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
-  -p 8080:8080 \
-  groovy-agent:local \
-  --workspace /output "store the current date in time.txt"
-```
-
-Once the image starts, try prompts like:
-- `list the files in the workspace at depth 1`
-- `read README.md`
-- `search for the word "agent" in .go files`
-
-### Runtime environment variables
-
-Agent/OpenAI-compatible settings (all optional in this image):
-
-- `OPENAI_BASE_URL`
-- `OPENAI_MODEL`
-- `OPENAI_API_KEY`
-- `OPENAI_REQUEST_TIMEOUT` (Go duration, default `3h`; `0` disables the timeout)
-- `AGENT_OUTPUT_DIR` (default `/output` in the container, `output` on bare metal)
-
-llama-server/container settings:
+Container/`docker/entrypoint.sh` environment variables:
 
 - `LLAMA_SERVER_HOST` (default `127.0.0.1`)
 - `LLAMA_SERVER_PORT` (default `8080`)
-- `LLAMA_MODEL_PATH` or `LLAMA_MODEL_FILE`
-- `LLAMA_MODEL_NAME` (model alias passed to `llama-server --alias`)
-- `LLAMA_CTX_SIZE`
-- `LLAMA_THREADS`
-- `LLAMA_N_GPU_LAYERS`
-- `LLAMA_EXTRA_ARGS`
-- `LLAMA_STARTUP_TIMEOUT`
+- `LLAMA_MODEL_PATH` or `LLAMA_MODEL_FILE` (default filename
+  `Phi-4-mini-instruct.Q8_0.gguf`, looked up under `/models`)
+- `LLAMA_MODEL_NAME` (model alias passed to `llama-server --alias` and to
+  `groovy-agent --model`; default `Phi-4-mini-instruct`)
+- `LLAMA_CTX_SIZE` (default `8192`)
+- `LLAMA_THREADS` (default: autodetected via `nproc`)
+- `LLAMA_N_GPU_LAYERS` (default `0`)
+- `LLAMA_STARTUP_TIMEOUT` (seconds, default `180`)
+- `LLAMA_EXTRA_ARGS` (space-separated extra `llama-server` flags; avoid
+  values containing spaces, and never source this from untrusted input)
+- `LLAMA_REPEAT_PENALTY` / `LLAMA_REPEAT_LAST_N` / `LLAMA_PREDICT_LIMIT`:
+  sampling guardrails that curb small-model repetition loops
+- `AGENT_OUTPUT_DIR` (default `/output` in the container)
 
-## MCP configuration
+## Quick smoke test
 
-Build the binary and add it to an MCP client's configuration:
+Once `llama-server` is reachable and the MCP binary is built (either via
+Docker or locally, see above), verify the whole pipeline end to end:
+
+```sh
+./bin/groovy-agent \
+  --llama-url http://127.0.0.1:8080 \
+  --model Phi-4-mini-instruct \
+  --mcp-command ./bin/coreutils-mcp \
+  --workspace . \
+  "what is the sha256sum of go.mod?"
+```
+
+A correct run prints diagnostics on stderr (workspace, model, discovered
+tools, model rounds) and a single final answer line on stdout. If you
+just want to validate the container packaging without any model, use
+`./scripts/container-smoke-test.sh` instead (see above).
+
+## MCP server standalone mode
+
+`cmd/coreutils-mcp` can also be pointed at by any MCP-compatible client
+as a standalone read-only coreutils server:
 
 ```json
 {
   "mcpServers": {
     "coreutils": {
-      "command": "/absolute/path/to/groovy-agent"
+      "command": "/absolute/path/to/coreutils-mcp",
+      "args": ["--workspace", "/absolute/path/to/workspace"]
     }
   }
 }
 ```
 
-The default mode is an MCP server using newline-delimited JSON-RPC over
-standard input and output.
+It speaks newline-delimited JSON-RPC over stdin/stdout; diagnostics go to
+stderr only.
 
-## Moderator/planner architecture
+## Removed / out of scope
 
-Both `agent` (interactive) and `run` (headless) route every user turn through
-an internal moderator/planner (`internal/moderator`) before any tool executes.
-This replaces a single free-running loop, where the model both chose tools and
-narrated results, with a deterministic pipeline:
-
-```text
-user turn
-   │
-   ▼
-moderator prompt + conversation → local model → exactly one JSON Plan
-   │
-   ▼
-Go validates the Plan (internal/moderator.Validate)
-   │  - decision must be answer | use_tools | clarify | reject
-   │  - use_tools requires a known tool name and a JSON object for
-   │    every tool_calls[i].arguments
-   │  - require_writes paths are normalized to workspace-relative paths
-   ▼
-accepted use_tools plan → dispatched through the existing in-process MCP
-server (same channel as native tool_calls / the standalone JSON envelope) →
-workspace confinement and approval/Yolo/plan-mode policy still apply
-   │
-   ▼
-verified execution summary built only from actual ToolEvents
-(internal/moderator.BuildReport / VerifiedReport.Render)
-```
-
-The model returns one JSON object shaped like:
-
-```json
-{
-  "decision": "use_tools",
-  "reason": "short rationale, never a claim that something already happened",
-  "tool_calls": [
-    {"name": "write_file", "arguments": {"path": "time.txt", "content": "2026-09-04\n"}}
-  ],
-  "require_writes": ["time.txt"]
-}
-```
-
-- `decision` selects how the turn is handled: `answer` (no tools needed, a
-  normal conversational reply follows), `use_tools` (execute `tool_calls` in
-  order), `clarify` (ask the user a question, taken verbatim from `reason`),
-  or `reject` (refuse, with `reason` explaining why).
-- `tool_calls` are only executed when `decision` is `use_tools`; each entry's
-  `arguments` must be a JSON object and its `name` must be a currently listed
-  tool (from `tools/list`), or the plan is rejected before anything runs.
-- `require_writes` lists workspace-relative files the request is expected to
-  create or modify. These are merged with any CLI `--require-write` paths and
-  verified identically: the turn is only considered complete if `write_file`
-  successfully targeted each exact normalized path and the file exists
-  afterward. This makes the postcondition automatic for planner-declared
-  outputs, not just paths supplied via `--require-write` — closing the gap
-  where a model could run `date` but never call `write_file` and still be
-  reported as having created a file.
-
-If the model returns anything other than exactly one valid JSON object (free
-prose, multiple values, an unknown tool name, non-object arguments, an unknown
-`decision`, etc.), the moderator asks once more with corrective feedback
-describing the rejection. If the second attempt is still invalid, the turn
-fails with an explicit planning error rather than silently falling back to
-unvalidated free-form execution.
-
-**Verification, not narration.** For `use_tools` plans, the final response is
-not generated by asking the model to summarize what it did. It is rendered
-directly from a `VerifiedReport` built from the actual `ToolEvent`s recorded
-during execution: files changed (only paths with a successful `write_file` /
-`apply_patch` / `mkdir`), commands run, and `run_tests` pass/fail status, plus
-any required writes that remain unmet. The model's own `reason` may be
-prefixed as a short rationale, but it is never the source of truth for what
-was changed, run, or validated.
-
-**Bounded repair, not open-ended looping.** If required writes are unmet after
-the first plan executes, the moderator asks for exactly one follow-up plan
-scoped to the missing paths and executes it the same validated way. If that
-still does not satisfy every required write, the turn fails with
-`required write was not completed: PATH` — the same error `--require-write`
-has always produced, now also reachable purely from a planner-declared
-`require_writes` entry.
-
-**Limitations.** The moderator asks for one upfront ordered list of tool
-calls per turn (plus at most one bounded repair attempt for unmet required
-writes); it does not run an open-ended, multi-round tool loop where later
-tool calls are chosen after observing earlier tool output within the same
-turn. Tasks that genuinely need to react to an intermediate result (for
-example, reading a file to decide how to patch it) may need to be split
-across separate user turns. Small local models can still produce an invalid
-plan on both attempts, in which case the turn fails explicitly instead of
-guessing; this is intentional, since the goal is a deterministic Go-owned
-decision rather than trusting model prose.
-
-## Agent mode (interactive REPL)
-
-```sh
-go run . agent [--workspace PATH] [--plan] [--yolo] [--resume SESSION_ID] [--require-write PATH ...]
-```
-
-Environment variables:
-
-- `OPENAI_API_KEY` (required; set to `local-llama` inside the container)
-- `OPENAI_MODEL` (required; set to the llama-server model alias in the container)
-- `OPENAI_BASE_URL` (default: `http://127.0.0.1:8080/v1`; **only loopback addresses are accepted**)
-- `OPENAI_REQUEST_TIMEOUT` (optional Go duration, default: `3h`; `0` disables)
-
-**Inference is local-only.** The agent enforces that `OPENAI_BASE_URL` resolves
-to a loopback address (`127.0.0.1`, `localhost`, or `::1`). Remote endpoints
-such as `https://api.openai.com/v1` are rejected at startup with a clear error.
-This ensures that the binary always talks to the bundled local llama.cpp server
-rather than any external API.
-
-**Tool dispatch via MCP.** All model-requested tool calls are routed through an
-in-process MCP server using serialized JSON-RPC (`initialize`,
-`notifications/initialized`, `tools/list`, `tools/call`). The tool schemas
-passed to the model are derived from `tools/list`, and results are fed back as
-MCP content objects. This means the agent can be observed and extended using
-standard MCP tooling.
-
-**Inference protocol vs MCP dispatch.** `llama-server` is only the
-OpenAI-compatible inference endpoint. It does not speak MCP. MCP remains the
-local dispatch layer inside `groovy-agent`: the agent derives tool schemas from
-`tools/list`, sends those schemas to `/v1/chat/completions`, and then dispatches
-validated tool requests through the in-process MCP server.
-
-**Selected tool-call mode.** Every user turn first goes through the
-moderator/planner described above, which requires the model to return exactly
-one JSON Plan rather than free-form tool_calls. Once a `use_tools` plan is
-accepted, its `tool_calls` are converted into the same `toolCall` shape used
-elsewhere in the codebase and dispatched through the identical in-process MCP
-channel — the underlying dispatch primitives still accept both:
-
-- native OpenAI `message.tool_calls`, and
-- one standalone JSON object in assistant text with exactly `name`,
-  `arguments`, optional `id`, and optional `type: "function"`.
-
-The textual envelope may be bare JSON or fenced as `json`, but it must be the
-entire assistant response. Its `name` must match a listed tool, and its
-`arguments` must decode to a JSON object that the target tool accepts. Prose,
-shell commands, and malformed JSON are not executed at any layer.
-
-`--require-write PATH` adds a concrete postcondition for each ordinary user turn,
-merged with any workspace-relative paths the accepted plan itself declared in
-`require_writes`. The path must be workspace-relative, and the turn succeeds
-only if `write_file` successfully targets that exact normalized path and the
-file exists as a regular file in the workspace afterward. If the requirement is
-unmet, the agent requests at most one bounded repair plan scoped to the missing
-paths; shell commands are still not executed.
-
-Interactive slash commands:
-
-- `/help`
-- `/status`
-- `/diff`
-- `/plan` (toggle)
-- `/clear`
-- `/session`
-- `/resume <id>`
-
-Mutation tools (`write_file`, `apply_patch`, `mkdir`) require approval by
-default. Use `--yolo` to auto-approve. Use `--plan` to deny mutations while
-returning structured planning feedback to the model. `--require-write` verifies
-that a specific file write happened; it does not bypass approval, so interactive
-approval or `--yolo` is still required for the write itself. `exec_command` is
-also subject to this approval policy, but `run_tests` is a dedicated read-only
-validation tool and always runs without approval, in any mode (including plan
-mode and without `--yolo`).
-
-Sessions are persisted as JSONL snapshots under:
-
-- `.groovy-agent/sessions/<session-id>.jsonl`
-
-Project instructions are loaded at startup (if present), in this order:
-
-1. `GROOVY.md`
-2. `AGENTS.md`
-3. `.groovy-agent/instructions.md`
-
-Loaded instructions are context only; they do not bypass workspace or approval
-policy.
-
-## Headless mode
-
-```sh
-go run . run -p "summarize current diff" [--workspace PATH] [--output text|json] [--plan] [--yolo] [--resume SESSION_ID] [--require-write PATH ...] [--max-tool-rounds N]
-```
-
-In non-interactive mode without `--yolo`, mutating tools are denied instead of
-prompting.
-
-Each turn is handled by the moderator/planner described above: the model must
-return exactly one JSON Plan, Go validates and executes any accepted
-`tool_calls` through the same MCP dispatcher used elsewhere, and the reported
-answer for tool-using plans is a verified execution summary derived from
-actual tool results. `--max-tool-rounds` gates whether a bounded repair plan
-may be requested when required writes are unmet (a value of `1` disables the
-repair attempt); it no longer controls an open-ended per-turn tool loop, since
-the moderator asks for one ordered plan of tool calls per turn instead.
-
-In headless mode, each `--require-write PATH` flag adds a verified postcondition
-for the run, and is merged with any workspace-relative paths the accepted plan
-itself listed in `require_writes`. A run exits with failure unless `write_file`
-successfully writes that exact normalized workspace-relative path during the
-run and the file exists afterward. When a required write is missed, the agent
-performs at most one bounded repair plan before returning
-`required write was not completed: PATH`.
-
-**Example: the originally reported failure now fails loudly instead of lying.**
-A prompt like "obtain the current date and store it in time.txt" can still
-lead a small local model to plan only a `date` command without a matching
-`write_file` call. Previously, only an explicit `--require-write time.txt`
-caught this. Now, if the model's plan itself declares
-`"require_writes": ["time.txt"]` (which the moderator system prompt asks it
-to do whenever a request expects file output), the same verified check runs
-automatically — the run fails with `required write was not completed:
-time.txt` instead of reporting success. Passing `--require-write time.txt`
-explicitly continues to work exactly as before and composes with any
-planner-declared paths.
-
-## Command-line use
-
-The same binary can run a utility directly:
-
-```sh
-go run . sha256sum README.md
-printf 'one\ntwo\n' | go run . wc
-printf 'b\na\n' | go run . sort
-```
-
-Behavior summary:
-
-- `groovy-agent` (no args) or `groovy-agent mcp`: MCP server mode
-- `groovy-agent agent [flags]`: interactive AI agent mode
-- `groovy-agent run -p \"...\" [flags]`: headless agent mode
-- `groovy-agent exec [--workspace PATH] [--workdir DIR] [--timeout 30s] [--env KEY=VALUE ...] <executable> [args...]`: run one command in a workspace-confined directory and print JSON results
-- `groovy-agent <utility> ...`: direct coreutils command mode
-
-## Safe coding boundaries and non-goals
-
-- No shell string interpolation or unrestricted network-fetch tools.
-- Command execution uses explicit executable + argument arrays and workspace-confined working directories.
-- File tools are confined to a canonical workspace root.
-- Path traversal (`..`), absolute paths outside workspace, and symlink escapes
-  are rejected.
-- `apply_patch` intentionally supports a robust subset of unified diff:
-  text-only updates to existing regular files; rename/copy/binary/new/delete
-  patch metadata is rejected in favor of explicit `write_file`/`mkdir`.
-
-This is a focused, portable implementation rather than a claim of complete
-GNU coreutils compatibility. Unsupported options return an error instead of
-being silently ignored.
-
-`grep` supports regular expressions by default, or literal searches with `-F`,
-along with `-n` (line numbers), `-v` (inverted matches), and `-E`. Each input
-is limited to 16 MiB. `cp` copies regular files and will not replace an
-existing destination unless `-f` is supplied. `date` supports `-u` and a
-`+FORMAT` using `%Y`, `%m`, `%d`, `%H`, `%M`, `%S`, `%z`, `%Z`, `%F`, `%T`,
-and `%%`.
+This rebuild intentionally does not include (and will not add without a
+new, explicit design): network-fetch tools, browser automation, GitHub or
+other cloud-provider integrations, package-manager invocation, arbitrary
+shell/command execution, file-write/patch tools, multi-turn session
+persistence, or a moderator/planner layer. The only integration surface
+is the coreutils MCP tool set described above, plus the local
+`llama-server` HTTP API.

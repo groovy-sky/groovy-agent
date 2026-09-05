@@ -1,4 +1,4 @@
-name: Build and publish Qwen2.5 image
+name: Build and publish Phi-4-mini-instruct image
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
       - coreutils/**
       - internal/**
       - go.mod
-      - .github/workflows/publish-qwen2_5.yml
+      - .github/workflows/publish-phi4-mini.yml
   workflow_dispatch:
 
 permissions:
@@ -20,7 +20,7 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/groovy-agent
-  IMAGE_TAG: Qwen2_5
+  IMAGE_TAG: phi4-mini
 
 jobs:
   build-and-push:
@@ -40,7 +40,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push image with Qwen2.5-Coder-7B-Instruct-Q4_K_M
+      - name: Build and push image with Phi-4-mini-instruct.Q8_0
         uses: docker/build-push-action@v6
         with:
           context: .
