@@ -259,3 +259,15 @@ func TestHTTPUsesCustomPath(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+func TestHTTPHandlerNormalizesPathWithoutLeadingSlash(t *testing.T) {
+	server := newTestServer(t, t.TempDir())
+	httpServer := httptest.NewServer(server.HTTPHandler(HTTPOptions{Path: "custom/mcp"}))
+	t.Cleanup(httpServer.Close)
+
+	resp := postJSON(t, httpServer.URL+"/custom/mcp", "", `{"jsonrpc":"2.0","id":1,"method":"ping"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on normalized path, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}

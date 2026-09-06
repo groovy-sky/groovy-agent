@@ -53,7 +53,8 @@ if [[ "${1:-}" == "mcp" ]]; then
 
   /usr/local/bin/coreutils-mcp "${mcp_args[@]}" &
   mcp_pid=$!
-  trap 'kill -TERM "$mcp_pid" 2>/dev/null || true' INT TERM
+  trap 'kill -TERM "$mcp_pid" 2>/dev/null || true' TERM
+  trap 'kill -INT "$mcp_pid" 2>/dev/null || true' INT
 
   set +e
   wait "$mcp_pid"

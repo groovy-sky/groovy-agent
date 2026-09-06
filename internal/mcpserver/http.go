@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strings"
 
 	"github.com/groovy-sky/groovy-agent/internal/mcpproto"
 )
@@ -42,13 +43,23 @@ type HTTPOptions struct {
 // are answered with 405, which the specification permits for servers that do
 // not support those optional capabilities.
 func (s *Server) HTTPHandler(opts HTTPOptions) http.Handler {
-	path := opts.Path
-	if path == "" {
-		path = DefaultHTTPPath
-	}
+	path := normalizeHTTPPath(opts.Path)
 	mux := http.NewServeMux()
 	mux.HandleFunc(path, s.handleHTTP(opts))
 	return mux
+}
+
+// normalizeHTTPPath ensures the endpoint path is a well-formed http.ServeMux
+// pattern (it must start with "/"), so a caller-supplied --http-path can
+// never make HandleFunc panic at startup.
+func normalizeHTTPPath(path string) string {
+	if path == "" {
+		return DefaultHTTPPath
+	}
+	if !strings.HasPrefix(path, "/") {
+		return "/" + path
+	}
+	return path
 }
 
 func (s *Server) handleHTTP(opts HTTPOptions) http.HandlerFunc {
