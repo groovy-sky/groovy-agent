@@ -32,6 +32,21 @@ Go CLI agent (cmd/agent)
    └── stdio ────► coreutils MCP server (cmd/coreutils-mcp)
 ```
 
+`cmd/coreutils-mcp` can alternatively be run in a second, independent
+mode that serves the same read-only tool set over the network for any
+remote MCP-compatible client, instead of being spawned as the agent's
+stdio child process:
+
+```text
+Remote MCP client ── MCP Streamable HTTP ──► coreutils MCP server (cmd/coreutils-mcp --transport http)
+```
+
+This does **not** go through `llama-server` or the Go agent at all; it is
+a standalone deployment of the coreutils MCP server for clients that speak
+MCP natively (see [MCP server standalone mode](#mcp-server-standalone-mode)
+below).
+```
+
 The agent (`internal/agent`):
 
 1. Validates configuration (workspace must exist; URLs must be http/https).
@@ -185,7 +200,7 @@ become healthy, then runs `groovy-agent` with the bundled MCP server
 configured.
 
 `groovy-agent` is a one-shot CLI, so the container behaves differently
-depending on whether the command contains a positional prompt:
+depending on the command it is given:
 
 - **with a prompt** (`docker run ... groovy-agent:local "what is today's
   date?"`): the agent answers that single request, prints the answer on
@@ -193,7 +208,13 @@ depending on whether the command contains a positional prompt:
 - **without a prompt** (`docker run ... groovy-agent:local`): there is
   nothing for the one-shot agent to do, so the entrypoint skips it and
   keeps `llama-server` running as an OpenAI-compatible API server until
-  the container is stopped.
+  the container is stopped;
+- **with `mcp` as the first argument** (`docker run ... groovy-agent:local
+  mcp`): the entrypoint does not start `llama-server` or the agent at
+  all; it runs `coreutils-mcp --transport http`, serving the bundled
+  read-only coreutils tool set over the MCP Streamable HTTP transport for
+  any remote MCP-compatible client (see [Run the remote MCP server](#run-the-remote-mcp-server-no-llama-server)
+  below).
 
 ### Build with the model baked into the image
 
@@ -254,6 +275,79 @@ docker run --rm \
   --workspace /output "summarize the first lines of README.md"
 ```
 
+### Run the remote MCP server (no llama-server)
+
+Pass `mcp` as the container command to serve the bundled read-only
+coreutils tool set over the
+[MCP Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http)
+for any remote MCP-compatible client. This mode does not start
+`llama-server` or `groovy-agent`; it is independent of, and can be
+published separately from, the OpenAI-compatible API:
+
+```sh
+docker run --rm \
+  -v "$(pwd)/output:/output" \
+  -p 8765:8765 \
+  -e MCP_HTTP_TOKEN=change-me \
+  groovy-agent:local \
+  mcp
+```
+
+The MCP endpoint is then `http://127.0.0.1:8765/mcp` on the host. **Do
+not** point llama.cpp's built-in web UI at this endpoint: that UI is only
+an OpenAI-compatible chat client and has no concept of MCP servers, so it
+will never show or connect to `coreutils-mcp` no matter which port you
+give it. Instead, configure an MCP-capable client to connect directly to
+the Streamable HTTP endpoint, for example:
+
+```json
+{
+  "mcpServers": {
+    "coreutils": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp",
+      "headers": {
+        "Authorization": "<AUTH_HEADER_VALUE>"
+      }
+    }
+  }
+}
+```
+
+Set the header value to the word "Bearer" followed by a space and the
+`MCP_HTTP_TOKEN` value (omit the `headers` block entirely if you did not
+set `MCP_HTTP_TOKEN`).
+
+Security implications of publishing this port:
+
+- **Set `MCP_HTTP_TOKEN`** (or `--http-token` if running `coreutils-mcp`
+  directly) whenever the port is reachable from anything other than a
+  fully trusted local network. Without it, every request is accepted
+  unauthenticated: the entrypoint logs a startup warning to remind you,
+  and the tool set is read-only/workspace-confined but still lets any
+  reachable caller read files under the mounted workspace.
+- The image binds `MCP_HTTP_HOST=0.0.0.0` by default so `-p` publishing
+  works (as with `LLAMA_SERVER_HOST`, above); it is Docker's `-p` mapping,
+  not the bind address, that controls whether the port is reachable from
+  outside the container. Omit `-p` to keep the endpoint host-only.
+  `cmd/coreutils-mcp` run directly on a host (outside Docker) instead
+  defaults `--listen` to `127.0.0.1:8765` (loopback-only) precisely so it
+  is not reachable from the network unless you explicitly rebind it.
+- Mount only the directory you intend to expose as `/output`; every tool
+  call is confined to that workspace root regardless of the request.
+
+Configuration for this mode (env vars, all optional):
+
+- `MCP_HTTP_HOST` (default `0.0.0.0`)
+- `MCP_HTTP_PORT` (default `8765`)
+- `MCP_HTTP_PATH` (default `/mcp`)
+- `MCP_HTTP_TOKEN` (default unset/unauthenticated; see above)
+- `MCP_WORKSPACE` (default `${AGENT_OUTPUT_DIR:-/output}`)
+
+Any extra arguments after `mcp` are forwarded to `coreutils-mcp` and can
+override these, e.g. `docker run ... groovy-agent:local mcp --http-path
+/coreutils`.
+
 ### Container smoke test
 
 Validate the runtime image's packaging and `docker/entrypoint.sh` wiring
@@ -272,14 +366,21 @@ This builds the `runtime` target with `DOWNLOAD_MODEL=0`, then checks:
   bundled MCP server configured;
 - without a positional prompt, the entrypoint does not invoke
   `groovy-agent` and keeps llama-server serving until the container is
-  stopped.
+  stopped;
+- `docker run ... mcp` starts `coreutils-mcp --transport http` (and
+  never `llama-server`), and completes a real `initialize` /
+  `notifications/initialized` / `tools/list` / `tools/call` (`pwd`)
+  exchange against it over MCP Streamable HTTP.
 
-The forwarding checks replace `llama-server` and `groovy-agent` inside
-the container with deterministic stub scripts (a minimal HTTP server
-that answers `/health`, and a script that records its argv), so no
-model, GPU, or CPU inference is required and no llama-server port is
-ever published outside the container. Set `CONTAINER_ENGINE=podman` to
-run it with Podman instead of Docker.
+The llama-server/groovy-agent forwarding checks replace those two
+binaries inside the container with deterministic stub scripts (a
+minimal HTTP server that answers `/health`, and a script that records
+its argv), so no model, GPU, or CPU inference is required and no
+llama-server port is ever published outside the container. The `mcp`
+mode check instead runs the real `coreutils-mcp` binary (still no
+model/GPU/CPU inference is involved) and talks to it with `docker exec`,
+so its HTTP port is never published outside the container either. Set
+`CONTAINER_ENGINE=podman` to run it with Podman instead of Docker.
 
 ## Configuration / environment variables
 
@@ -294,6 +395,20 @@ Agent CLI flags (`cmd/agent`):
 - `--workspace` (default `.`): directory that bounds every filesystem
   operation performed by the MCP tools.
 - remaining arguments are joined as the prompt.
+
+`coreutils-mcp` CLI flags (`cmd/coreutils-mcp`):
+
+- `--workspace` (default `.`): directory that bounds every filesystem
+  operation.
+- `--transport` (default `stdio`): `stdio` for a locally spawned
+  MCP client, or `http` to serve the MCP Streamable HTTP transport.
+- `--listen` (default `127.0.0.1:8765`, `--transport=http` only): bind
+  address; defaults to loopback so it is not reachable from the network
+  unless you deliberately rebind it.
+- `--http-path` (default `/mcp`, `--transport=http` only): endpoint path.
+- `--http-token` (default unset, `--transport=http` only): if set,
+  requests must carry a matching bearer authorization header; if unset,
+  the server logs a warning and accepts unauthenticated requests.
 
 Container/`docker/entrypoint.sh` environment variables:
 
@@ -312,6 +427,12 @@ Container/`docker/entrypoint.sh` environment variables:
 - `LLAMA_REPEAT_PENALTY` / `LLAMA_REPEAT_LAST_N` / `LLAMA_PREDICT_LIMIT`:
   sampling guardrails that curb small-model repetition loops
 - `AGENT_OUTPUT_DIR` (default `/output` in the container)
+- `MCP_HTTP_HOST` (default `0.0.0.0`), `MCP_HTTP_PORT` (default `8765`),
+  `MCP_HTTP_PATH` (default `/mcp`), `MCP_HTTP_TOKEN` (default unset), and
+  `MCP_WORKSPACE` (default `${AGENT_OUTPUT_DIR:-/output}`): only used by
+  the `mcp` container mode (see
+  [Run the remote MCP server](#run-the-remote-mcp-server-no-llama-server)
+  above).
 
 ## Quick smoke test
 
@@ -334,8 +455,13 @@ just want to validate the container packaging without any model, use
 
 ## MCP server standalone mode
 
-`cmd/coreutils-mcp` can also be pointed at by any MCP-compatible client
-as a standalone read-only coreutils server:
+`cmd/coreutils-mcp` can be pointed at by any MCP-compatible client as a
+standalone read-only coreutils server, over either transport.
+
+### stdio (local clients that spawn a child process)
+
+This is the default (`--transport stdio`) and the most common way to
+plug the tool set into a local MCP client:
 
 ```json
 {
@@ -350,6 +476,36 @@ as a standalone read-only coreutils server:
 
 It speaks newline-delimited JSON-RPC over stdin/stdout; diagnostics go to
 stderr only.
+
+### Streamable HTTP (remote clients)
+
+Run with `--transport http` to serve the same tool set over the
+[MCP Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http)
+instead, for clients that connect over the network rather than spawning
+a child process:
+
+```sh
+./bin/coreutils-mcp \
+  --workspace /absolute/path/to/workspace \
+  --transport http \
+  --listen 127.0.0.1:8765 \
+  --http-token change-me
+```
+
+Then point any Streamable-HTTP-capable MCP client at
+`http://127.0.0.1:8765/mcp`, sending the configured bearer token in the
+`Authorization` header (see the Docker section above for a client
+configuration example and the security implications of publishing this
+port beyond loopback). This is a plain `POST /mcp` JSON-RPC
+request/response endpoint: the server never sends unsolicited messages,
+so `GET`/`DELETE` (used for optional server-initiated streaming and
+session termination) are answered with `405 Method Not Allowed`, and
+batched JSON-RPC arrays are not supported.
+
+Note that **llama.cpp's own web UI cannot connect to this endpoint or
+any MCP server**: it is a chat UI for `llama-server`'s
+OpenAI-compatible API and has no MCP client support, so it will never
+list `coreutils-mcp` regardless of how this server is deployed.
 
 ## Removed / out of scope
 
