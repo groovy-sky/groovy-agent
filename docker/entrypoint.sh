@@ -12,6 +12,63 @@ exec 3<&0
 # Ensure the output directory exists so result JSON files can always be written.
 mkdir -p "${AGENT_OUTPUT_DIR:-/output}"
 
+# `mcp` is an explicit subcommand (the container's first positional argument),
+# distinct from both the default no-prompt llama-server API mode and the
+# prompted one-shot `groovy-agent` mode. It serves the bundled read-only
+# coreutils MCP tool set over the MCP Streamable HTTP transport so a remote
+# MCP-compatible client can connect to it directly. llama-server is not
+# started in this mode: the remote MCP service is independent of the
+# llama.cpp OpenAI-compatible API and can be published on its own.
+if [[ "${1:-}" == "mcp" ]]; then
+  shift
+
+  MCP_HTTP_HOST="${MCP_HTTP_HOST:-0.0.0.0}"
+  MCP_HTTP_PORT="${MCP_HTTP_PORT:-8765}"
+  MCP_HTTP_PATH="${MCP_HTTP_PATH:-/mcp}"
+  MCP_HTTP_TOKEN="${MCP_HTTP_TOKEN:-}"
+  MCP_WORKSPACE="${MCP_WORKSPACE:-${AGENT_OUTPUT_DIR:-/output}}"
+  mkdir -p "$MCP_WORKSPACE"
+
+  mcp_args=(
+    --workspace "$MCP_WORKSPACE"
+    --transport http
+    --listen "${MCP_HTTP_HOST}:${MCP_HTTP_PORT}"
+    --http-path "$MCP_HTTP_PATH"
+  )
+  if [[ -n "$MCP_HTTP_TOKEN" ]]; then
+    mcp_args+=(--http-token "$MCP_HTTP_TOKEN")
+  fi
+  mcp_args+=("$@")
+
+  echo "remote MCP server (Streamable HTTP): http://${MCP_HTTP_HOST}:${MCP_HTTP_PORT}${MCP_HTTP_PATH}" >&2
+  echo "workspace: ${MCP_WORKSPACE}" >&2
+  echo "publish it with 'docker run -p ${MCP_HTTP_PORT}:${MCP_HTTP_PORT} ...'" >&2
+  if [[ -z "$MCP_HTTP_TOKEN" ]]; then
+    echo "WARNING: MCP_HTTP_TOKEN is not set. Anyone who can reach the published" >&2
+    echo "         port gets unauthenticated access to the read-only filesystem" >&2
+    echo "         tools. Only publish this port on a trusted network, or set" >&2
+    echo "         MCP_HTTP_TOKEN and require clients to send an" >&2
+    echo "         'Authorization: Bearer' header carrying that token." >&2
+  fi
+
+  /usr/local/bin/coreutils-mcp "${mcp_args[@]}" &
+  mcp_pid=$!
+  trap 'kill -TERM "$mcp_pid" 2>/dev/null || true' INT TERM
+
+  set +e
+  wait "$mcp_pid"
+  status=$?
+  # A trapped signal interrupts `wait` (status > 128) before coreutils-mcp has
+  # actually exited; keep waiting for its real exit status after the trap has
+  # forwarded the signal.
+  while (( status > 128 )) && kill -0 "$mcp_pid" 2>/dev/null; do
+    wait "$mcp_pid"
+    status=$?
+  done
+  set -e
+  exit "$status"
+fi
+
 LLAMA_SERVER_HOST="${LLAMA_SERVER_HOST:-127.0.0.1}"
 LLAMA_SERVER_PORT="${LLAMA_SERVER_PORT:-8080}"
 LLAMA_MODEL_FILE="${LLAMA_MODEL_FILE:-Phi-4-mini-instruct.Q8_0.gguf}"

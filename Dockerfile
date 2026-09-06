@@ -50,7 +50,10 @@ ENV LLAMA_SERVER_HOST=0.0.0.0 \
     LLAMA_N_GPU_LAYERS=0 \
     LLAMA_STARTUP_TIMEOUT=180 \
     LD_LIBRARY_PATH=/opt/llama \
-    AGENT_OUTPUT_DIR=/output
+    AGENT_OUTPUT_DIR=/output \
+    MCP_HTTP_HOST=0.0.0.0 \
+    MCP_HTTP_PORT=8765 \
+    MCP_HTTP_PATH=/mcp
 
 COPY --from=go-builder /out/groovy-agent /usr/local/bin/groovy-agent
 COPY --from=go-builder /out/coreutils-mcp /usr/local/bin/coreutils-mcp
@@ -62,5 +65,5 @@ RUN test -x /opt/llama/llama-server \
     && mkdir -p /output
 
 VOLUME /output
-EXPOSE 8080
+EXPOSE 8080 8765
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
