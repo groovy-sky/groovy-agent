@@ -49,6 +49,14 @@ echo "==> Verifying compiled binaries"
   'test -x /usr/local/bin/groovy-agent && test -x /usr/local/bin/coreutils-mcp'
 echo "    groovy-agent and coreutils-mcp binaries OK"
 
+echo "==> Verifying llama-server host default"
+if ! "$CONTAINER_ENGINE" inspect \
+    --format '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE_NAME" | grep -qx 'LLAMA_SERVER_HOST=0.0.0.0'; then
+  echo "FAIL: expected image default LLAMA_SERVER_HOST=0.0.0.0" >&2
+  exit 1
+fi
+echo "    LLAMA_SERVER_HOST defaults to 0.0.0.0"
+
 mkdir -p "$WORK_DIR/output"
 
 cat > "$WORK_DIR/stub-llama-server" <<'EOF'
