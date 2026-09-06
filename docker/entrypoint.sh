@@ -51,7 +51,10 @@ LLAMA_PREDICT_LIMIT="${LLAMA_PREDICT_LIMIT:-1024}"
 #
 # Every agent flag takes a value, so `-flag value` consumes the next argument
 # unless the value is inlined as `-flag=value`.  `--` terminates flag parsing.
-# Unknown flags are forwarded to the agent so it can report the error itself.
+# The flag list below must be kept in sync with the flags registered in
+# cmd/agent/main.go: an unlisted value-taking flag would make its value look
+# like a positional prompt.
+
 # The agent joins its positional arguments and trims them, so whitespace-only
 # arguments are not a usable prompt either.
 positional_is_prompt() {
@@ -77,7 +80,9 @@ has_positional_prompt() {
         fi
         ;;
       -*)
-        # Unrecognized flag: let the agent parse and report it.
+        # Unrecognized flag: deliberately select one-shot mode (rather than
+        # reporting a prompt) so the agent parses the flag and reports the
+        # error itself.
         return 0
         ;;
       *)
