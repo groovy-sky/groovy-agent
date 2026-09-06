@@ -181,8 +181,19 @@ files are ignored by git (see `.gitignore`).
 The `Dockerfile` builds both Go binaries, layers them on top of the
 official `llama.cpp` server image, and wires everything together with
 `docker/entrypoint.sh`, which starts `llama-server`, waits for it to
-become healthy, then execs `groovy-agent` with the bundled MCP server
+become healthy, then runs `groovy-agent` with the bundled MCP server
 configured.
+
+`groovy-agent` is a one-shot CLI, so the container behaves differently
+depending on whether the command contains a positional prompt:
+
+- **with a prompt** (`docker run ... groovy-agent:local "what is today's
+  date?"`): the agent answers that single request, prints the answer on
+  stdout, and the container exits with the agent's exit status;
+- **without a prompt** (`docker run ... groovy-agent:local`): there is
+  nothing for the one-shot agent to do, so the entrypoint skips it and
+  keeps `llama-server` running as an OpenAI-compatible API server until
+  the container is stopped.
 
 ### Build with the model baked into the image
 
@@ -203,13 +214,32 @@ DOCKER_BUILDKIT=1 docker build -t groovy-agent:local .
 Then run with the host-downloaded model mounted read-only:
 
 ```sh
-docker run --rm -it \
+docker run --rm \
   -v "$(pwd)/artifacts/models:/models:ro" \
   -e LLAMA_MODEL_PATH=/models/Phi-4-mini-instruct.Q8_0.gguf \
-  -p 8080:8080 \
   groovy-agent:local \
   --workspace /output "what is today's date?"
 ```
+
+### Run as an API server (no prompt)
+
+Omit the prompt to keep `llama-server` running instead of answering a
+single request. Bind it to all interfaces so the published port is
+reachable from the host:
+
+```sh
+docker run --rm \
+  -v "$(pwd)/artifacts/models:/models:ro" \
+  -e LLAMA_MODEL_PATH=/models/Phi-4-mini-instruct.Q8_0.gguf \
+  -e LLAMA_SERVER_HOST=0.0.0.0 \
+  -p 8080:8080 \
+  groovy-agent:local
+```
+
+The OpenAI-compatible API is then available at
+`http://127.0.0.1:8080/v1` on the host (model name
+`Phi-4-mini-instruct`). Note that `llama-server` allows all CORS origins
+and uses no API key, so only expose it on trusted networks.
 
 ### Output persistence
 
@@ -221,7 +251,6 @@ docker run --rm \
   -v "$(pwd)/artifacts/models:/models:ro" \
   -v "$(pwd)/output:/output" \
   -e LLAMA_MODEL_PATH=/models/Phi-4-mini-instruct.Q8_0.gguf \
-  -p 8080:8080 \
   groovy-agent:local \
   --workspace /output "summarize the first lines of README.md"
 ```
@@ -241,7 +270,10 @@ This builds the `runtime` target with `DOWNLOAD_MODEL=0`, then checks:
   `/usr/local/bin/coreutils-mcp` binaries are present;
 - `docker/entrypoint.sh` starts llama-server, waits for it to become
   ready, and forwards the container command to `groovy-agent` with the
-  bundled MCP server configured.
+  bundled MCP server configured;
+- without a positional prompt, the entrypoint does not invoke
+  `groovy-agent` and keeps llama-server serving until the container is
+  stopped.
 
 The forwarding checks replace `llama-server` and `groovy-agent` inside
 the container with deterministic stub scripts (a minimal HTTP server

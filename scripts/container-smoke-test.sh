@@ -9,6 +9,9 @@
 #   2. `docker/entrypoint.sh` starts llama-server, waits for it to become
 #      healthy, and forwards the container command to `groovy-agent`
 #      with the bundled MCP server configured.
+#   3. Without a positional prompt, `docker/entrypoint.sh` does not invoke
+#      `groovy-agent` (which is a one-shot CLI and would fail with a usage
+#      error) and instead keeps llama-server serving its API until stopped.
 #
 # Test 2 replaces `llama-server` and `groovy-agent` inside the container with
 # small deterministic stubs (a Python HTTP server that answers /health, and a
@@ -128,5 +131,61 @@ if ! tail -n1 "$WORK_DIR/output/forward-log.txt" | grep -qx "test prompt"; then
   echo "FAIL: expected prompt to be forwarded" >&2
   exit 1
 fi
+
+# Without a positional prompt there is nothing for the one-shot agent to do, so
+# the entrypoint must keep llama-server running as an API server instead of
+# invoking groovy-agent and failing with its missing-prompt usage error.
+echo "==> Verifying no-prompt serve-only mode"
+rm -f "$WORK_DIR/output/forward-log.txt"
+"$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+"$CONTAINER_ENGINE" run -d \
+  --name "$CONTAINER_NAME" \
+  -v "$WORK_DIR/stub-llama-server:/opt/llama/llama-server:ro" \
+  -v "$WORK_DIR/stub-groovy-agent:/usr/local/bin/groovy-agent:ro" \
+  -v "$WORK_DIR/fake-model.gguf:/models/Phi-4-mini-instruct.Q8_0.gguf:ro" \
+  -v "$WORK_DIR/output:/output" \
+  -e LLAMA_STARTUP_TIMEOUT=15 \
+  "$IMAGE_NAME" >/dev/null
+
+serve_deadline=$((SECONDS + 60))
+until "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" 2>&1 | grep -q "serving llama-server only"; do
+  if (( SECONDS >= serve_deadline )); then
+    echo "FAIL: entrypoint did not announce serve-only mode" >&2
+    "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" >&2 || true
+    exit 1
+  fi
+  sleep 1
+done
+
+if [[ "$("$CONTAINER_ENGINE" inspect -f '{{.State.Running}}' "$CONTAINER_NAME")" != "true" ]]; then
+  echo "FAIL: container exited instead of serving llama-server" >&2
+  "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" >&2 || true
+  exit 1
+fi
+
+if [[ -f "$WORK_DIR/output/forward-log.txt" ]]; then
+  echo "FAIL: groovy-agent was invoked without a prompt" >&2
+  exit 1
+fi
+
+if ! "$CONTAINER_ENGINE" exec "$CONTAINER_NAME" \
+    curl -fsS "http://127.0.0.1:8080/v1/models" >/dev/null; then
+  echo "FAIL: llama-server API not reachable in serve-only mode" >&2
+  exit 1
+fi
+echo "    llama-server kept serving and groovy-agent was not invoked"
+
+"$CONTAINER_ENGINE" stop -t 15 "$CONTAINER_NAME" >/dev/null
+serve_exit="$("$CONTAINER_ENGINE" inspect -f '{{.State.ExitCode}}' "$CONTAINER_NAME")"
+case "$serve_exit" in
+  0|143) ;;
+  *)
+    echo "FAIL: serve-only container exited with unexpected status $serve_exit" >&2
+    "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" >&2 || true
+    exit 1
+    ;;
+esac
+echo "    serve-only container shut down cleanly on SIGTERM (exit $serve_exit)"
+"$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
 echo "==> Container smoke test passed"
