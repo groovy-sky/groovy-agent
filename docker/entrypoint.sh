@@ -12,6 +12,23 @@ exec 3<&0
 # Ensure the output directory exists so result JSON files can always be written.
 mkdir -p "${AGENT_OUTPUT_DIR:-/output}"
 
+# Waits for a backgrounded process to exit and sets $wait_status to its exit
+# code, retrying `wait` after a trapped signal forwarded to that process
+# interrupts `wait` early (status > 128) but before the process has actually
+# exited. Used by every mode below that simply supervises one long-running
+# child process (llama-server in serve-only mode; coreutils-mcp in mcp mode).
+wait_for_exit_status() {
+  local pid="$1"
+  set +e
+  wait "$pid"
+  wait_status=$?
+  while (( wait_status > 128 )) && kill -0 "$pid" 2>/dev/null; do
+    wait "$pid"
+    wait_status=$?
+  done
+  set -e
+}
+
 # `mcp` is an explicit subcommand (the container's first positional argument),
 # distinct from both the default no-prompt llama-server API mode and the
 # prompted one-shot `groovy-agent` mode. It serves the bundled read-only
@@ -56,18 +73,8 @@ if [[ "${1:-}" == "mcp" ]]; then
   trap 'kill -TERM "$mcp_pid" 2>/dev/null || true' TERM
   trap 'kill -INT "$mcp_pid" 2>/dev/null || true' INT
 
-  set +e
-  wait "$mcp_pid"
-  status=$?
-  # A trapped signal interrupts `wait` (status > 128) before coreutils-mcp has
-  # actually exited; keep waiting for its real exit status after the trap has
-  # forwarded the signal.
-  while (( status > 128 )) && kill -0 "$mcp_pid" 2>/dev/null; do
-    wait "$mcp_pid"
-    status=$?
-  done
-  set -e
-  exit "$status"
+  wait_for_exit_status "$mcp_pid"
+  exit "$wait_status"
 fi
 
 LLAMA_SERVER_HOST="${LLAMA_SERVER_HOST:-127.0.0.1}"
@@ -232,18 +239,8 @@ if [[ "$agent_mode" == "serve" ]]; then
   echo "publish it with 'docker run -p 8080:8080 ...'" >&2
   echo "to run a one-shot agent request instead, append a prompt, e.g." >&2
   echo "  docker run --rm ... groovy-agent:local --workspace /output \"what is today's date?\"" >&2
-  set +e
-  wait "$llama_pid"
-  status=$?
-  # A trapped signal interrupts `wait` (status > 128) before llama-server has
-  # actually exited; keep waiting for its real exit status after the trap has
-  # forwarded the signal.
-  while (( status > 128 )) && kill -0 "$llama_pid" 2>/dev/null; do
-    wait "$llama_pid"
-    status=$?
-  done
-  set -e
-  exit "$status"
+  wait_for_exit_status "$llama_pid"
+  exit "$wait_status"
 fi
 
 agent_args=(

@@ -59,11 +59,8 @@ func main() {
 }
 
 func serveHTTP(ctx context.Context, logger *log.Logger, server *mcpserver.Server, listen, path, token string) error {
-	if token == "" {
-		host, _, err := net.SplitHostPort(listen)
-		if err != nil || (host != "127.0.0.1" && host != "localhost" && host != "::1") {
-			logger.Printf("WARNING: --listen=%s has no --http-token set; every reachable client gets unauthenticated filesystem tool access", listen)
-		}
+	if shouldWarnUnauthenticated(listen, token) {
+		logger.Printf("WARNING: --listen=%s has no --http-token set; every reachable client gets unauthenticated filesystem tool access", listen)
 	}
 
 	handler := server.HTTPHandler(mcpserver.HTTPOptions{Path: path, BearerToken: token})
@@ -97,4 +94,19 @@ func serveHTTP(ctx context.Context, logger *log.Logger, server *mcpserver.Server
 	case err := <-errCh:
 		return err
 	}
+}
+
+// shouldWarnUnauthenticated reports whether serveHTTP should warn that a
+// --transport=http deployment accepts unauthenticated requests: no
+// --http-token was configured, and the bind address is not loopback-only
+// (so it is reachable from beyond the local machine once published).
+func shouldWarnUnauthenticated(listen, token string) bool {
+	if token != "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return true
+	}
+	return host != "127.0.0.1" && host != "localhost" && host != "::1"
 }
