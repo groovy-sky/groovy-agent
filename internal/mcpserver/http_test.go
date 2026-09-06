@@ -213,6 +213,26 @@ func TestHTTPBearerTokenIsEnforced(t *testing.T) {
 	authorized.Body.Close()
 }
 
+func TestHTTPBearerSchemeIsCaseInsensitive(t *testing.T) {
+	_, httpServer := newTestHTTPServer(t, HTTPOptions{BearerToken: "secret-token"})
+
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL+DefaultHTTPPath,
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "bearer secret-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 with lowercase scheme, got %d", resp.StatusCode)
+	}
+}
+
 func TestHTTPToolCallEnforcesWorkspaceProtection(t *testing.T) {
 	_, httpServer := newTestHTTPServer(t, HTTPOptions{})
 	resp := postJSON(t, httpServer.URL+DefaultHTTPPath, "",

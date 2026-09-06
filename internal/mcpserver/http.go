@@ -90,10 +90,12 @@ func authorized(r *http.Request, token string) bool {
 	}
 	const prefix = "Bearer "
 	header := r.Header.Get("Authorization")
-	// The "Bearer " scheme prefix is public (RFC 6750), so comparing it with
-	// a plain, non-constant-time check leaks nothing secret; only the
-	// token itself is compared in constant time below.
-	if len(header) <= len(prefix) || header[:len(prefix)] != prefix {
+	// The scheme name is case-insensitive per RFC 7235, so a client sending
+	// "bearer <token>" must still be accepted. The prefix itself is public
+	// (RFC 6750), so comparing it with a plain, non-constant-time check
+	// leaks nothing secret; only the token itself is compared in constant
+	// time below.
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
 		return false
 	}
 	supplied := header[len(prefix):]
