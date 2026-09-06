@@ -38,7 +38,7 @@ FROM llama-runtime AS runtime
 # llama-server binaries keep the exact glibc/libstdc++/OpenSSL runtime they were
 # built against.
 
-ENV LLAMA_SERVER_HOST=127.0.0.1 \
+ENV LLAMA_SERVER_HOST=0.0.0.0 \
     LLAMA_SERVER_PORT=8080 \
     LLAMA_MODEL_FILE=Phi-4-mini-instruct.Q8_0.gguf \
     LLAMA_MODEL_NAME=Phi-4-mini-instruct \

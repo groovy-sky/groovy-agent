@@ -224,14 +224,13 @@ docker run --rm \
 ### Run as an API server (no prompt)
 
 Omit the prompt to keep `llama-server` running instead of answering a
-single request. Bind it to all interfaces so the published port is
-reachable from the host:
+single request. The image defaults to binding `llama-server` to all
+container interfaces so the published port is reachable from the host:
 
 ```sh
 docker run --rm \
   -v "$(pwd)/artifacts/models:/models:ro" \
   -e LLAMA_MODEL_PATH=/models/Phi-4-mini-instruct.Q8_0.gguf \
-  -e LLAMA_SERVER_HOST=0.0.0.0 \
   -p 8080:8080 \
   groovy-agent:local
 ```
@@ -298,7 +297,7 @@ Agent CLI flags (`cmd/agent`):
 
 Container/`docker/entrypoint.sh` environment variables:
 
-- `LLAMA_SERVER_HOST` (default `127.0.0.1`)
+- `LLAMA_SERVER_HOST` (default `0.0.0.0`)
 - `LLAMA_SERVER_PORT` (default `8080`)
 - `LLAMA_MODEL_PATH` or `LLAMA_MODEL_FILE` (default filename
   `Phi-4-mini-instruct.Q8_0.gguf`, looked up under `/models`)

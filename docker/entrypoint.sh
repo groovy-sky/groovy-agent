@@ -171,7 +171,7 @@ if [[ "$agent_mode" == "serve" ]]; then
   # instead of exiting with the agent's missing-prompt usage error.
   echo "no prompt argument supplied: serving llama-server only" >&2
   echo "OpenAI-compatible API: ${OPENAI_BASE_URL} (model: ${OPENAI_MODEL})" >&2
-  echo "publish it with 'docker run -p 8080:8080 -e LLAMA_SERVER_HOST=0.0.0.0 ...'" >&2
+  echo "publish it with 'docker run -p 8080:8080 ...'" >&2
   echo "to run a one-shot agent request instead, append a prompt, e.g." >&2
   echo "  docker run --rm ... groovy-agent:local --workspace /output \"what is today's date?\"" >&2
   set +e
