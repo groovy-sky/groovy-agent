@@ -17,6 +17,7 @@ FROM debian:bookworm-slim AS model-fetch
 ARG DOWNLOAD_MODEL=0
 ARG MODEL_URL="https://huggingface.co/unsloth/Phi-4-mini-instruct-GGUF/resolve/main/Phi-4-mini-instruct.Q8_0.gguf"
 ARG MODEL_FILENAME="Phi-4-mini-instruct.Q8_0.gguf"
+ARG MODEL_NAME="Phi-4-mini-instruct"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
@@ -37,11 +38,13 @@ FROM llama-runtime AS runtime
 # Keep the final image on the pinned llama.cpp runtime base so the copied
 # llama-server binaries keep the exact glibc/libstdc++/OpenSSL runtime they were
 # built against.
+ARG MODEL_FILENAME="Phi-4-mini-instruct.Q8_0.gguf"
+ARG MODEL_NAME="Phi-4-mini-instruct"
 
 ENV LLAMA_SERVER_HOST=0.0.0.0 \
     LLAMA_SERVER_PORT=8080 \
-    LLAMA_MODEL_FILE=Phi-4-mini-instruct.Q8_0.gguf \
-    LLAMA_MODEL_NAME=Phi-4-mini-instruct \
+    LLAMA_MODEL_FILE=${MODEL_FILENAME} \
+    LLAMA_MODEL_NAME=${MODEL_NAME} \
     LLAMA_CTX_SIZE=8192 \
     LLAMA_THREADS=0 \
     LLAMA_N_GPU_LAYERS=0 \
