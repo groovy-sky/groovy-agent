@@ -12,12 +12,20 @@
 #   3. Without a positional prompt, `docker/entrypoint.sh` does not invoke
 #      `groovy-agent` (which is a one-shot CLI and would fail with a usage
 #      error) and instead keeps llama-server serving its API until stopped.
+#   4. `docker run ... mcp` serves the bundled coreutils MCP tool set over the
+#      MCP Streamable HTTP transport, independently of llama-server (which is
+#      not started in this mode), and completes a real `initialize` /
+#      `notifications/initialized` / `tools/list` / `tools/call` (`pwd`)
+#      exchange against the actual `coreutils-mcp` binary.
 #
 # Test 2 replaces `llama-server` and `groovy-agent` inside the container with
 # small deterministic stubs (a Python HTTP server that answers /health, and a
 # script that records argv) so no real LLM inference happens, no model
 # download is required, and no llama-server is ever exposed outside the
-# container (no `-p`/published ports are used).
+# container (no `-p`/published ports are used). Test 4 uses the real
+# `coreutils-mcp` binary (no model/GPU/CPU inference is involved) and talks to
+# it with `docker exec` so its HTTP port is never published outside the
+# container either.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -194,6 +202,87 @@ case "$serve_exit" in
     ;;
 esac
 echo "    serve-only container shut down cleanly on SIGTERM (exit $serve_exit)"
+"$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+# The `mcp` subcommand is a third, explicit deployment mode: it serves the
+# bundled read-only coreutils MCP tool set over the MCP Streamable HTTP
+# transport, independently of llama-server (which is not started at all in
+# this mode). This exercises the real `coreutils-mcp` binary end to end
+# (initialize, tools/list, tools/call) without any model/GPU/CPU inference,
+# using `docker exec` so no port is ever published outside the container.
+echo "==> Verifying remote MCP server mode (docker run ... mcp)"
+rm -f "$WORK_DIR/output/forward-log.txt"
+"$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+"$CONTAINER_ENGINE" run -d \
+  --name "$CONTAINER_NAME" \
+  -v "$WORK_DIR/output:/output" \
+  "$IMAGE_NAME" mcp >/dev/null
+
+mcp_deadline=$((SECONDS + 30))
+until "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" 2>&1 | grep -q "listening for MCP Streamable HTTP"; do
+  if (( SECONDS >= mcp_deadline )); then
+    echo "FAIL: coreutils-mcp did not report it was listening" >&2
+    "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" >&2 || true
+    exit 1
+  fi
+  if [[ "$("$CONTAINER_ENGINE" inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" != "true" ]]; then
+    echo "FAIL: mcp container exited before becoming ready" >&2
+    "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" >&2 || true
+    exit 1
+  fi
+  sleep 1
+done
+
+if ! "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" 2>&1 | grep -q "WARNING: MCP_HTTP_TOKEN is not set"; then
+  echo "FAIL: expected an unauthenticated-exposure warning without MCP_HTTP_TOKEN" >&2
+  exit 1
+fi
+echo "    coreutils-mcp is listening and warns about the missing bearer token"
+
+initialize_response="$("$CONTAINER_ENGINE" exec "$CONTAINER_NAME" curl -fsS \
+  -X POST "http://127.0.0.1:8765/mcp" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke-test","version":"1"}}}')"
+if [[ "$initialize_response" != *'"protocolVersion"'* ]]; then
+  echo "FAIL: initialize did not return a protocol version: $initialize_response" >&2
+  exit 1
+fi
+
+"$CONTAINER_ENGINE" exec "$CONTAINER_NAME" curl -fsS \
+  -X POST "http://127.0.0.1:8765/mcp" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
+
+tools_response="$("$CONTAINER_ENGINE" exec "$CONTAINER_NAME" curl -fsS \
+  -X POST "http://127.0.0.1:8765/mcp" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')"
+if [[ "$tools_response" != *'"pwd"'* ]]; then
+  echo "FAIL: tools/list did not advertise the pwd tool: $tools_response" >&2
+  exit 1
+fi
+
+pwd_response="$("$CONTAINER_ENGINE" exec "$CONTAINER_NAME" curl -fsS \
+  -X POST "http://127.0.0.1:8765/mcp" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"pwd","arguments":{}}}')"
+if [[ "$pwd_response" != *'\"success\":true'* ]]; then
+  echo "FAIL: pwd tool call did not succeed: $pwd_response" >&2
+  exit 1
+fi
+echo "    initialize / tools/list / tools/call (pwd) succeeded over Streamable HTTP"
+
+"$CONTAINER_ENGINE" stop -t 15 "$CONTAINER_NAME" >/dev/null
+mcp_exit="$("$CONTAINER_ENGINE" inspect -f '{{.State.ExitCode}}' "$CONTAINER_NAME")"
+case "$mcp_exit" in
+  0|143) ;;
+  *)
+    echo "FAIL: mcp container exited with unexpected status $mcp_exit" >&2
+    "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" >&2 || true
+    exit 1
+    ;;
+esac
+echo "    mcp container shut down cleanly on SIGTERM (exit $mcp_exit)"
 "$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
 echo "==> Container smoke test passed"
