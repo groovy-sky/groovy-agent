@@ -63,9 +63,21 @@ func serveHTTP(ctx context.Context, logger *log.Logger, server *mcpserver.Server
 		logger.Printf("WARNING: --listen=%s has no --http-token set; every reachable client gets unauthenticated filesystem tool access", listen)
 	}
 
+	// Bind synchronously (rather than inside the goroutine via
+	// ListenAndServe) so a listen failure - e.g. the address is already in
+	// use - is returned immediately, and so the socket is guaranteed bound
+	// before this function returns control to the caller (or a concurrent
+	// ctx cancellation can race Shutdown against Serve). Serve() checks
+	// whether the server has already been told to shut down before it
+	// starts accepting, so this ordering is safe even if ctx is cancelled
+	// before the goroutine below runs.
+	listener, err := net.Listen("tcp", listen)
+	if err != nil {
+		return err
+	}
+
 	handler := server.HTTPHandler(mcpserver.HTTPOptions{Path: path, BearerToken: token})
 	httpServer := &http.Server{
-		Addr:              listen,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -75,8 +87,8 @@ func serveHTTP(ctx context.Context, logger *log.Logger, server *mcpserver.Server
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Printf("listening for MCP Streamable HTTP on http://%s%s", listen, path)
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Printf("listening for MCP Streamable HTTP on http://%s%s", listener.Addr(), path)
+		if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
 		}

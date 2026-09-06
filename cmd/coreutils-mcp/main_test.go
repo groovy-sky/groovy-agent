@@ -54,8 +54,10 @@ func TestServeHTTPShutsDownOnContextCancel(t *testing.T) {
 		errCh <- serveHTTP(ctx, logger, server, "127.0.0.1:0", mcpserver.DefaultHTTPPath, "")
 	}()
 
-	// Give the listener goroutine a moment to start before cancelling.
-	time.Sleep(50 * time.Millisecond)
+	// serveHTTP binds the listener synchronously before returning control,
+	// and http.Server.Serve/Shutdown are safe to race against each other, so
+	// cancelling immediately (no sleep) still deterministically exercises a
+	// graceful shutdown without flaking on slow machines.
 	cancel()
 
 	select {
