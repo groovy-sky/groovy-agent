@@ -20,6 +20,13 @@ import (
 	"github.com/groovy-sky/groovy-agent/internal/mcpserver"
 )
 
+// httpShutdownTimeout bounds how long serveHTTP waits for in-flight
+// requests to finish once shutdown is requested, before giving up and
+// forcibly closing remaining connections. It is kept well under the
+// docker/entrypoint.sh "mcp" mode's SIGTERM grace period so the process
+// exits on its own before the container runtime sends SIGKILL.
+const httpShutdownTimeout = 5 * time.Second
+
 func main() {
 	workspace := flag.String("workspace", ".", "workspace directory that bounds every filesystem operation")
 	transport := flag.String("transport", "stdio", `MCP transport to serve: "stdio" or "http"`)
@@ -97,7 +104,7 @@ func serveHTTP(ctx context.Context, logger *log.Logger, server *mcpserver.Server
 
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 		defer cancel()
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			return err

@@ -173,6 +173,24 @@ func TestHTTPRejectsWrongContentType(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestHTTPRejectsMissingContentType(t *testing.T) {
+	_, httpServer := newTestHTTPServer(t, HTTPOptions{})
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL+DefaultHTTPPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	// Deliberately do not set Content-Type: the transport must not guess
+	// that an untyped body is JSON-RPC.
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected 415 for missing Content-Type, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestHTTPRejectsGETAndDELETE(t *testing.T) {
 	_, httpServer := newTestHTTPServer(t, HTTPOptions{})
 	for _, method := range []string{http.MethodGet, http.MethodDelete} {

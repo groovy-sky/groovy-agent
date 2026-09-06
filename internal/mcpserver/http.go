@@ -103,12 +103,13 @@ func authorized(r *http.Request, token string) bool {
 }
 
 func (s *Server) handleHTTPPost(w http.ResponseWriter, r *http.Request) {
-	if ct := r.Header.Get("Content-Type"); ct != "" {
-		mediaType, _, err := mime.ParseMediaType(ct)
-		if err != nil || mediaType != "application/json" {
-			http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
-			return
-		}
+	// The Streamable HTTP transport requires POST bodies to be labeled
+	// application/json; reject silently-untyped requests rather than
+	// guessing, since we cannot verify the client actually sent JSON-RPC.
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		return
 	}
 
 	limited := io.LimitReader(r.Body, maxHTTPRequestBytes+1)
