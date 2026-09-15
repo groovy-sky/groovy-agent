@@ -24,6 +24,7 @@ func main() {
 	flags.StringVar(&config.MCPCommand, "mcp-command", "./bin/coreutils-mcp", "path to the coreutils MCP server executable")
 	flags.StringVar(&config.WebMCPCommand, "web-mcp-command", "", "optional path to the webutils MCP server executable")
 	flags.StringVar(&config.Workspace, "workspace", ".", "workspace directory that bounds every filesystem operation")
+	flags.IntVar(&config.MaxToolCallsPerTurn, "max-tool-calls-per-turn", agent.MaxToolCallsPerTurn, "maximum tool calls allowed in one assistant turn")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}

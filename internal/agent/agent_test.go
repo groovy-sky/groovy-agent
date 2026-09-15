@@ -205,6 +205,53 @@ func TestLoopStopsAtRoundLimit(t *testing.T) {
 	}
 }
 
+func TestLoopStopsWhenAssistantTurnExceedsToolCallLimit(t *testing.T) {
+	workspace := t.TempDir()
+	model := &fakeModel{replies: []llm.Message{{
+		Role: "assistant",
+		ToolCalls: []llm.ToolCall{
+			toolCall("c1", "coreutils_run", `{"command":"wc","stdin":"a"}`),
+			toolCall("c2", "coreutils_run", `{"command":"wc","stdin":"b"}`),
+			toolCall("c3", "coreutils_run", `{"command":"wc","stdin":"c"}`),
+			toolCall("c4", "coreutils_run", `{"command":"wc","stdin":"d"}`),
+		},
+	}}}
+	session, output := newSession(t, workspace, "Show the current workspace path.", model)
+	session.config.MaxToolCallsPerTurn = 3
+
+	if err := session.Loop(context.Background()); err != nil {
+		t.Fatalf("Loop failed: %v", err)
+	}
+	if strings.TrimSpace(output.String()) != ToolGuardLimitMessage {
+		t.Fatalf("unexpected output %q", output.String())
+	}
+	if len(model.requests) != 1 {
+		t.Fatalf("expected loop termination in first round, got %d requests", len(model.requests))
+	}
+}
+
+func TestLoopStopsWhenAssistantRepeatsToolCallInTurn(t *testing.T) {
+	workspace := t.TempDir()
+	model := &fakeModel{replies: []llm.Message{{
+		Role: "assistant",
+		ToolCalls: []llm.ToolCall{
+			toolCall("c1", "coreutils_run", `{"command":"wc","stdin":"same"}`),
+			toolCall("c2", "coreutils_run", `{"command":"wc","stdin":"same"}`),
+		},
+	}}}
+	session, output := newSession(t, workspace, "Show the current workspace path.", model)
+
+	if err := session.Loop(context.Background()); err != nil {
+		t.Fatalf("Loop failed: %v", err)
+	}
+	if strings.TrimSpace(output.String()) != ToolGuardDuplicateMessage {
+		t.Fatalf("unexpected output %q", output.String())
+	}
+	if len(model.requests) != 1 {
+		t.Fatalf("expected loop termination in first round, got %d requests", len(model.requests))
+	}
+}
+
 func TestLoopRejectsInvalidToolCalls(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("hello\n"), 0o600); err != nil {

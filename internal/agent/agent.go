@@ -22,15 +22,22 @@ import (
 
 // Bounded defaults from PLAN.md.
 const (
-	MaxModelRounds    = 3
-	MaxTotalToolCalls = 5
-	MaxResultBytes    = 16 << 10
-	MCPStartupTimeout = 10 * time.Second
-	ContextTokens     = 4096
-	ReservedTokens    = llm.MaxOutputTokens
+	MaxModelRounds      = 3
+	MaxTotalToolCalls   = 5
+	MaxToolCallsPerTurn = 3
+	MaxResultBytes      = 16 << 10
+	MCPStartupTimeout   = 10 * time.Second
+	ContextTokens       = 4096
+	ReservedTokens      = llm.MaxOutputTokens
 
 	// RoundLimitMessage is emitted verbatim when the round budget is spent.
 	RoundLimitMessage = "Agent stopped: maximum model rounds reached."
+	// ToolGuardLimitMessage is emitted when an assistant turn asks for too many
+	// tool calls.
+	ToolGuardLimitMessage = "Agent stopped early: assistant requested too many tool calls in one turn."
+	// ToolGuardDuplicateMessage is emitted when an assistant turn repeats a tool
+	// call with the same arguments.
+	ToolGuardDuplicateMessage = "Agent stopped early: assistant repeated an identical tool call in one turn."
 )
 
 // SystemPrompt is the short prompt from PLAN.md.
@@ -55,14 +62,15 @@ var AllowedWebTools = []string{"browse_url", "search_web"}
 
 // Config holds the validated CLI configuration.
 type Config struct {
-	LlamaURL      string
-	Model         string
-	MCPCommand    string
-	MCPArgs       []string
-	WebMCPCommand string
-	WebMCPArgs    []string
-	Workspace     string
-	Prompt        string
+	LlamaURL            string
+	Model               string
+	MCPCommand          string
+	MCPArgs             []string
+	WebMCPCommand       string
+	WebMCPArgs          []string
+	Workspace           string
+	Prompt              string
+	MaxToolCallsPerTurn int
 }
 
 // Validate checks the configuration and canonicalizes the workspace.
@@ -98,6 +106,9 @@ func (c *Config) Validate() error {
 		return errors.New("--workspace must be an existing directory")
 	}
 	c.Workspace = workspace
+	if c.MaxToolCallsPerTurn <= 0 {
+		c.MaxToolCallsPerTurn = MaxToolCallsPerTurn
+	}
 	return nil
 }
 
@@ -279,7 +290,22 @@ func (s *Session) Loop(ctx context.Context) error {
 			return nil
 		}
 
+		seenThisTurn := map[string]struct{}{}
+		perTurnLimit := s.config.MaxToolCallsPerTurn
+		if perTurnLimit <= 0 {
+			perTurnLimit = MaxToolCallsPerTurn
+		}
 		for index, call := range reply.ToolCalls {
+			if index >= perTurnLimit {
+				fmt.Fprintln(s.out, ToolGuardLimitMessage)
+				return nil
+			}
+			duplicateKey := call.Function.Name + "\n" + strings.TrimSpace(call.Function.Arguments)
+			if _, exists := seenThisTurn[duplicateKey]; exists {
+				fmt.Fprintln(s.out, ToolGuardDuplicateMessage)
+				return nil
+			}
+			seenThisTurn[duplicateKey] = struct{}{}
 			message, err := s.runToolCall(ctx, exposed, call, round, index)
 			if err != nil {
 				return err

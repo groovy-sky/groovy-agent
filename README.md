@@ -351,6 +351,12 @@ localhost; pass `LLAMA_EXTRA_ARGS="--cors-origins <origin>"` if a browser
 served from another origin has to reach it, or disable bundled MCP tools with
 `LLAMA_MCP_COREUTILS=0 LLAMA_MCP_WEBUTILS=0`.
 
+When bundled MCP is enabled, the entrypoint now starts a tiny OpenAI proxy in
+front of `llama-server` so `POST /v1/chat/completions` automatically includes
+MCP-discovered tools even when the client omits a manual `tools` array. If the
+bridge cannot fetch/translate tools at runtime, the response includes a
+diagnostic assistant message instead of a generic “cannot browse” claim.
+
 ### Bundled MCP tools inside llama.cpp
 
 The pinned `llama.cpp` build (`build 10481`, commit `25ae3a9b3`) is an MCP
@@ -710,9 +716,27 @@ Container/`docker/entrypoint.sh` environment variables:
   above)
 - `LLAMA_MCP_WORKSPACE` (default `${MCP_WORKSPACE:-${AGENT_OUTPUT_DIR:-/output}}`):
   workspace for the coreutils MCP server (webutils has no workspace access).
+- `LLAMA_UPSTREAM_HOST` / `LLAMA_UPSTREAM_PORT` (defaults `127.0.0.1` /
+  `18080`): internal bind address used by `llama-server` when MCP is enabled
+  and the OpenAI proxy is active.
+- `OPENAI_PROXY_LISTEN_ADDR` (default `${LLAMA_SERVER_HOST}:${LLAMA_SERVER_PORT}`):
+  listen address for the OpenAI-compatible MCP bridge proxy.
+- `OPENAI_PROXY_UPSTREAM_URL` (default `http://${LLAMA_UPSTREAM_HOST}:${LLAMA_UPSTREAM_PORT}`):
+  upstream URL the OpenAI proxy forwards requests to.
+- `OPENAI_PROXY_TOOLS_CACHE_SECONDS` (default `10`): cache TTL for MCP tool
+  discovery from `/tools` before the next refresh.
+- `OPENAI_PROXY_MAX_TOOL_CALLS_PER_TURN` (default from
+  `AGENT_MAX_TOOL_CALLS_PER_TURN`, default `3`): max tool calls allowed in one
+  assistant turn before the proxy emits a bounded partial-completion message.
+- `OPENAI_PROXY_DISABLE_DUPLICATE_TOOL_CALLS` (default `1`): when enabled, the
+  proxy blocks repeated identical tool calls (same function + arguments) inside
+  a single assistant turn and returns a partial-completion message.
 - `AGENT_WEB_MCP_COMMAND` (default unset): when set, entrypoint passes
   `--web-mcp-command` to one-shot `groovy-agent`, enabling agent-side
   browsing tool discovery from that server.
+- `AGENT_MAX_TOOL_CALLS_PER_TURN` (default `3`): passed to one-shot
+  `groovy-agent --max-tool-calls-per-turn` to cap tool calls per assistant turn
+  and stop repetitive loops safely.
 - `AGENT_OUTPUT_DIR` (default `/output` in the container)
 - `MCP_HTTP_HOST` (default `0.0.0.0`), `MCP_HTTP_PORT` (default `8765`),
   `MCP_HTTP_PATH` (default `/mcp`), `MCP_HTTP_TOKEN` (default unset), and
