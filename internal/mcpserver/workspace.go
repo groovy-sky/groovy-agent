@@ -157,6 +157,57 @@ func (s *Server) readFile(relative string, limit int) (string, bool, error) {
 	return string(buffer[:count]), truncated, nil
 }
 
+// readFileTail reads at most limit bytes from the end of a regular workspace
+// file.
+func (s *Server) readFileTail(relative string, limit int) (string, bool, error) {
+	path, err := s.resolvePath(relative)
+	if err != nil {
+		return "", false, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", false, fail(mcpproto.ErrorToolError, "file could not be inspected")
+	}
+	if info.IsDir() {
+		return "", false, fail(mcpproto.ErrorInvalidArguments, "path is a directory, not a file")
+	}
+	if !info.Mode().IsRegular() {
+		return "", false, fail(mcpproto.ErrorInvalidArguments, "path is not a regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsPermission(err) {
+			return "", false, fail(mcpproto.ErrorPermissionDenied, "file is not readable")
+		}
+		return "", false, fail(mcpproto.ErrorToolError, "file could not be opened")
+	}
+	defer file.Close()
+
+	if limit <= 0 || limit > s.limits.MaxFileReadBytes {
+		limit = s.limits.MaxFileReadBytes
+	}
+	size := info.Size()
+	offset := int64(0)
+	truncated := false
+	if size > int64(limit) {
+		offset = size - int64(limit)
+		truncated = true
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return "", false, fail(mcpproto.ErrorToolError, "file could not be read")
+	}
+	buffer := make([]byte, limit+1)
+	count, err := io.ReadFull(file, buffer)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return "", false, fail(mcpproto.ErrorToolError, "file could not be read")
+	}
+	if count > limit {
+		count = limit
+		truncated = true
+	}
+	return string(buffer[:count]), truncated, nil
+}
+
 // requireText extracts a bounded text argument.
 func (s *Server) requireText(arguments map[string]any, key string) (string, error) {
 	value, ok := arguments[key].(string)

@@ -92,25 +92,11 @@ func definitions() []tool {
 			description: "Print bounded workspace file content to the console output.",
 			schema: object(map[string]any{
 				"path":      pathField(),
-				"max_bytes": intField("Maximum bytes to read.", 1, 12<<10),
+				"max_bytes": intField("Maximum bytes to read. For view=head/tail this limit is applied before line selection.", 1, 12<<10),
+				"view":      map[string]any{"type": "string", "description": "Read mode.", "enum": []any{"full", "head", "tail"}},
+				"lines":     intField("Number of lines for head/tail mode.", 1, 200),
 			}, "path"),
 			run: runCat,
-		},
-		{
-			name:        "head",
-			description: "Read leading lines from a workspace file.",
-			schema: object(map[string]any{
-				"path": pathField(), "lines": intField("Number of lines.", 1, 200),
-			}, "path"),
-			run: runHead,
-		},
-		{
-			name:        "tail",
-			description: "Read trailing lines from a workspace file.",
-			schema: object(map[string]any{
-				"path": pathField(), "lines": intField("Number of lines.", 1, 200),
-			}, "path"),
-			run: runTail,
 		},
 		{
 			name:        "grep",
@@ -447,7 +433,43 @@ func runCat(_ context.Context, s *Server, arguments map[string]any) (payload, er
 	if err != nil {
 		return payload{}, err
 	}
+	view, _ := arguments["view"].(string)
+	if view == "" {
+		view = "full"
+	}
+	_, hasLines := arguments["lines"]
+	_, hasMaxBytes := arguments["max_bytes"]
+	if view == "full" && hasLines {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "\"lines\" requires view \"head\" or \"tail\"")
+	}
 	limit := optionalInt(arguments, "max_bytes", s.limits.MaxFileReadBytes)
+	lineCount := optionalInt(arguments, "lines", 20)
+	if view == "head" || view == "tail" {
+		read := s.readFile
+		if view == "tail" {
+			read = s.readFileTail
+		}
+		content, truncated, err := read(path, limit)
+		if err != nil {
+			return payload{}, err
+		}
+		var output string
+		var cut bool
+		if view == "head" {
+			output, cut = coreutils.Head(content, lineCount)
+		} else {
+			output, cut = coreutils.Tail(content, lineCount)
+		}
+		metadata := map[string]any{"path": path, "view": view, "lines": lineCount, "bytes": len(content)}
+		if hasMaxBytes {
+			metadata["max_bytes"] = limit
+		}
+		return payload{
+			Output:    output,
+			Truncated: truncated || cut,
+			Metadata:  metadata,
+		}, nil
+	}
 	content, truncated, err := s.readFile(path, limit)
 	if err != nil {
 		return payload{}, err
@@ -457,7 +479,7 @@ func runCat(_ context.Context, s *Server, arguments map[string]any) (payload, er
 	return payload{
 		Output:    output,
 		Truncated: truncated || clamped || cut,
-		Metadata:  map[string]any{"path": path, "bytes": len(content)},
+		Metadata:  map[string]any{"path": path, "view": view, "bytes": len(content)},
 	}, nil
 }
 

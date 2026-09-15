@@ -54,7 +54,7 @@ Do not repeat large tool output unless requested.`
 
 // AllowedCoreTools is the default bounded MCP tool policy.
 var AllowedCoreTools = []string{
-	"cat", "coreutils_run", "cp", "find", "grep", "head", "ls", "mkdir", "mv", "pwd", "rm", "rmdir", "tail", "touch", "write_file",
+	"cat", "coreutils_run", "cp", "find", "grep", "ls", "mkdir", "mv", "pwd", "rm", "rmdir", "touch", "write_file",
 }
 
 // AllowedWebTools are only considered when an explicit web MCP command is set.
