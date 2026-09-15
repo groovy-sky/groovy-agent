@@ -36,7 +36,7 @@ func call(t *testing.T, server *Server, name, arguments string) map[string]any {
 func TestOnlySafeMCPToolsAreExposed(t *testing.T) {
 	server := newTestServer(t, t.TempDir())
 	expected := []string{
-		"cat", "coreutils_run", "cp", "find", "grep", "head", "ls", "mkdir", "mv", "pwd", "rm", "rmdir", "tail", "touch", "write_file",
+		"cat", "coreutils_run", "cp", "find", "grep", "ls", "mkdir", "mv", "pwd", "rm", "rmdir", "touch", "write_file",
 	}
 	if names := server.ToolNames(); strings.Join(names, ",") != strings.Join(expected, ",") {
 		t.Fatalf("unexpected tools: %v", names)

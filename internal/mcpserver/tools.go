@@ -93,24 +93,10 @@ func definitions() []tool {
 			schema: object(map[string]any{
 				"path":      pathField(),
 				"max_bytes": intField("Maximum bytes to read.", 1, 12<<10),
+				"view":      map[string]any{"type": "string", "description": "Read mode.", "enum": []any{"full", "head", "tail"}},
+				"lines":     intField("Number of lines for head/tail mode.", 1, 200),
 			}, "path"),
 			run: runCat,
-		},
-		{
-			name:        "head",
-			description: "Read leading lines from a workspace file.",
-			schema: object(map[string]any{
-				"path": pathField(), "lines": intField("Number of lines.", 1, 200),
-			}, "path"),
-			run: runHead,
-		},
-		{
-			name:        "tail",
-			description: "Read trailing lines from a workspace file.",
-			schema: object(map[string]any{
-				"path": pathField(), "lines": intField("Number of lines.", 1, 200),
-			}, "path"),
-			run: runTail,
 		},
 		{
 			name:        "grep",
@@ -447,6 +433,29 @@ func runCat(_ context.Context, s *Server, arguments map[string]any) (payload, er
 	if err != nil {
 		return payload{}, err
 	}
+	view, _ := arguments["view"].(string)
+	if view == "" {
+		view = "full"
+	}
+	lineCount := optionalInt(arguments, "lines", 20)
+	if view == "head" || view == "tail" {
+		content, truncated, err := s.readFile(path, s.limits.MaxFileReadBytes)
+		if err != nil {
+			return payload{}, err
+		}
+		var output string
+		var cut bool
+		if view == "head" {
+			output, cut = coreutils.Head(content, lineCount)
+		} else {
+			output, cut = coreutils.Tail(content, lineCount)
+		}
+		return payload{
+			Output:    output,
+			Truncated: truncated || cut,
+			Metadata:  map[string]any{"path": path, "view": view, "lines": lineCount},
+		}, nil
+	}
 	limit := optionalInt(arguments, "max_bytes", s.limits.MaxFileReadBytes)
 	content, truncated, err := s.readFile(path, limit)
 	if err != nil {
@@ -457,7 +466,7 @@ func runCat(_ context.Context, s *Server, arguments map[string]any) (payload, er
 	return payload{
 		Output:    output,
 		Truncated: truncated || clamped || cut,
-		Metadata:  map[string]any{"path": path, "bytes": len(content)},
+		Metadata:  map[string]any{"path": path, "view": view, "bytes": len(content)},
 	}, nil
 }
 

@@ -109,7 +109,7 @@ and `cut -d DELIMITER -f FIELDS`. The response contains `command`, `stdout`,
 rejected before execution. The agent independently allowlists this same tool.
 
 It also exposes bounded workspace tools:
-- inspection/search: `pwd`, `ls`, `cat`, `head`, `tail`, `grep`, and `find`
+- inspection/search: `pwd`, `ls`, `cat`, `grep`, and `find`
 - file management: `touch`, `write_file`, `mkdir`, `cp`, `mv`, `rm`, and `rmdir`
 
 When `webutils-mcp` is explicitly enabled and allowlisted, the agent can also
@@ -118,7 +118,7 @@ expose:
 - `browse_url` (closed schema: `url`, optional `max_text_chars`,
   `capture_screenshot`, and `screenshot_mode`)
 
-`cat` is the bounded "print file content" tool. `grep` supports searching either
+`cat` is the bounded "print file content" tool and supports `view: "full" | "head" | "tail"` with optional `lines` for head/tail views. `grep` supports searching either
 one workspace file (`path`) or supplied text (`text`) and always returns bounded
 line-oriented matches (`line:text`). `find` recursively searches below a
 workspace-relative directory, returns bounded file/directory paths, and appends

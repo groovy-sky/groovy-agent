@@ -35,7 +35,7 @@ var profiles = []struct {
 		keywords: []string{"search text", "grep text", "supplied text", "input text", "string search", "search this text", "matching lines"},
 	},
 	{
-		profile:  Profile{Name: "file_search", Tools: []string{"find", "grep", "ls", "head", "cat"}},
+		profile:  Profile{Name: "file_search", Tools: []string{"find", "grep", "ls", "cat"}},
 		keywords: []string{"grep", "search", "find occurrences", "occurrence", "occurrences", "matches", "matching", "pattern", "todo", "look for", "contains"},
 	},
 	{
@@ -43,7 +43,7 @@ var profiles = []struct {
 		keywords: []string{"find file", "find files", "find directory", "find directories", "locate", "recursive", "under", "walk"},
 	},
 	{
-		profile:  Profile{Name: "file_inspection", Tools: []string{"pwd", "ls", "cat", "head", "tail", "coreutils_run"}},
+		profile:  Profile{Name: "file_inspection", Tools: []string{"pwd", "ls", "cat", "coreutils_run"}},
 		keywords: []string{"read", "show", "workspace", "readme", "file", "beginning", "summarize", "summary", "content", "contents", "checksum", "sha256", "hash", "inspect", "lines of", "print"},
 	},
 	{
