@@ -118,7 +118,7 @@ expose:
 - `browse_url` (closed schema: `url`, optional `max_text_chars`,
   `capture_screenshot`, and `screenshot_mode`)
 
-`cat` is the bounded "print file content" tool and supports `view: "full" | "head" | "tail"` with optional `lines` for head/tail views. `grep` supports searching either
+`cat` is the bounded "print file content" tool and supports `view: "full" | "head" | "tail"` with optional `lines` for head/tail views. If `max_bytes` is supplied with `view: "head"` or `view: "tail"`, the byte limit is applied first and line selection is then applied to that bounded slice. `grep` supports searching either
 one workspace file (`path`) or supplied text (`text`) and always returns bounded
 line-oriented matches (`line:text`). `find` recursively searches below a
 workspace-relative directory, returns bounded file/directory paths, and appends

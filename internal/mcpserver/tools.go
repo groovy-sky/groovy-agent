@@ -92,7 +92,7 @@ func definitions() []tool {
 			description: "Print bounded workspace file content to the console output.",
 			schema: object(map[string]any{
 				"path":      pathField(),
-				"max_bytes": intField("Maximum bytes to read.", 1, 12<<10),
+				"max_bytes": intField("Maximum bytes to read. For view=head/tail this limit is applied before line selection.", 1, 12<<10),
 				"view":      map[string]any{"type": "string", "description": "Read mode.", "enum": []any{"full", "head", "tail"}},
 				"lines":     intField("Number of lines for head/tail mode.", 1, 200),
 			}, "path"),
@@ -437,9 +437,19 @@ func runCat(_ context.Context, s *Server, arguments map[string]any) (payload, er
 	if view == "" {
 		view = "full"
 	}
+	_, hasLines := arguments["lines"]
+	_, hasMaxBytes := arguments["max_bytes"]
+	if view == "full" && hasLines {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "\"lines\" requires view \"head\" or \"tail\"")
+	}
+	limit := optionalInt(arguments, "max_bytes", s.limits.MaxFileReadBytes)
 	lineCount := optionalInt(arguments, "lines", 20)
 	if view == "head" || view == "tail" {
-		content, truncated, err := s.readFile(path, s.limits.MaxFileReadBytes)
+		read := s.readFile
+		if view == "tail" {
+			read = s.readFileTail
+		}
+		content, truncated, err := read(path, limit)
 		if err != nil {
 			return payload{}, err
 		}
@@ -450,13 +460,16 @@ func runCat(_ context.Context, s *Server, arguments map[string]any) (payload, er
 		} else {
 			output, cut = coreutils.Tail(content, lineCount)
 		}
+		metadata := map[string]any{"path": path, "view": view, "lines": lineCount, "bytes": len(content)}
+		if hasMaxBytes {
+			metadata["max_bytes"] = limit
+		}
 		return payload{
 			Output:    output,
 			Truncated: truncated || cut,
-			Metadata:  map[string]any{"path": path, "view": view, "lines": lineCount},
+			Metadata:  metadata,
 		}, nil
 	}
-	limit := optionalInt(arguments, "max_bytes", s.limits.MaxFileReadBytes)
 	content, truncated, err := s.readFile(path, limit)
 	if err != nil {
 		return payload{}, err

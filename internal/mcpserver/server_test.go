@@ -76,6 +76,44 @@ func TestCoreutilsRunExecutesAndRejectsUnsafeInput(t *testing.T) {
 	}
 }
 
+func TestCatViewArgumentsAreValidated(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("a\nb\nc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := newTestServer(t, workspace)
+	if body := call(t, server, "cat", `{"path":"README.md","lines":2}`); body["error"] != mcpproto.ErrorInvalidArguments {
+		t.Fatalf("expected lines+full rejection, got %v", body)
+	}
+	if body := call(t, server, "cat", `{"path":"README.md","view":"middle"}`); body["error"] != mcpproto.ErrorInvalidArguments {
+		t.Fatalf("expected invalid view rejection, got %v", body)
+	}
+	full := call(t, server, "cat", `{"path":"README.md"}`)
+	if full["success"] != true || full["output"] != "a\nb\nc\n" {
+		t.Fatalf("expected successful default full view output, got %v", full)
+	}
+	fullMeta, ok := full["metadata"].(map[string]any)
+	if !ok || fullMeta["view"] != "full" {
+		t.Fatalf("unexpected full metadata: %v", full["metadata"])
+	}
+	head := call(t, server, "cat", `{"path":"README.md","view":"head","lines":2}`)
+	if head["success"] != true || head["output"] != "a\nb\n" {
+		t.Fatalf("expected successful head view output, got %v", head)
+	}
+	headMeta, ok := head["metadata"].(map[string]any)
+	if !ok || headMeta["view"] != "head" || headMeta["lines"] != float64(2) {
+		t.Fatalf("unexpected head metadata: %v", head["metadata"])
+	}
+	tail := call(t, server, "cat", `{"path":"README.md","view":"tail","lines":2,"max_bytes":4}`)
+	if tail["success"] != true || tail["output"] != "b\nc\n" {
+		t.Fatalf("expected successful tail view output, got %v", tail)
+	}
+	tailMeta, ok := tail["metadata"].(map[string]any)
+	if !ok || tailMeta["view"] != "tail" || tailMeta["lines"] != float64(2) || tailMeta["max_bytes"] != float64(4) {
+		t.Fatalf("unexpected tail metadata: %v", tail["metadata"])
+	}
+}
+
 func TestServeHandlesLifecycleOverStdio(t *testing.T) {
 	server := newTestServer(t, t.TempDir())
 	input := strings.NewReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n")
