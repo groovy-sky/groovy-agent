@@ -14,9 +14,12 @@ import (
 )
 
 type fakeBrowser struct {
-	result BrowseResult
-	err    error
-	last   BrowseRequest
+	result       BrowseResult
+	err          error
+	last         BrowseRequest
+	searchResult SearchResult
+	searchErr    error
+	lastSearch   SearchRequest
 }
 
 func (f *fakeBrowser) Browse(_ context.Context, req BrowseRequest) (BrowseResult, error) {
@@ -24,10 +27,15 @@ func (f *fakeBrowser) Browse(_ context.Context, req BrowseRequest) (BrowseResult
 	return f.result, f.err
 }
 
+func (f *fakeBrowser) Search(_ context.Context, req SearchRequest) (SearchResult, error) {
+	f.lastSearch = req
+	return f.searchResult, f.searchErr
+}
+
 func TestToolSchemaAndListWiring(t *testing.T) {
 	server := NewServer(DefaultLimits(), &fakeBrowser{}, log.New(io.Discard, "", 0))
 	list := server.listTools()
-	if len(list.Tools) != 1 || list.Tools[0].Name != toolNameBrowseURL {
+	if len(list.Tools) != 2 || list.Tools[0].Name != toolNameBrowseURL || list.Tools[1].Name != toolNameSearchWeb {
 		t.Fatalf("unexpected tools list: %+v", list.Tools)
 	}
 	schema := map[string]any{}
@@ -65,6 +73,21 @@ func TestToolSchemaAndListWiring(t *testing.T) {
 	}
 	if _, ok := mode["enum"]; !ok {
 		t.Fatalf("expected screenshot_mode enum, got %+v", mode)
+	}
+
+	searchSchema := map[string]any{}
+	if err := json.Unmarshal(list.Tools[1].InputSchema, &searchSchema); err != nil {
+		t.Fatalf("unmarshal search schema: %v", err)
+	}
+	searchProps, ok := searchSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected search schema properties map, got %+v", searchSchema["properties"])
+	}
+	if _, ok := searchProps["query"]; !ok {
+		t.Fatalf("expected query property, got %+v", searchProps)
+	}
+	if _, ok := searchProps["max_results"]; !ok {
+		t.Fatalf("expected max_results property, got %+v", searchProps)
 	}
 }
 
@@ -117,6 +140,18 @@ func TestCallToolForwardsActionsInOrder(t *testing.T) {
 	browser := &fakeBrowser{result: BrowseResult{FinalURL: "https://example.com"}}
 	server := NewServer(DefaultLimits(), browser, log.New(io.Discard, "", 0))
 	raw := json.RawMessage(`{"name":"browse_url","arguments":{"url":"https://example.com","actions":[{"type":"wait_visible","selector":"#login"},{"type":"set_value","selector":"input[name=email]","value":"user@example.com"},{"type":"type","selector":"input[name=password]","value":"secret"},{"type":"click","selector":"button[type=submit]"}]}}`)
+func TestCallToolSearchSuccess(t *testing.T) {
+	browser := &fakeBrowser{searchResult: SearchResult{
+		Engine:      searchEngineDuckDuckGo,
+		Query:       "golang",
+		FinalURL:    "https://duckduckgo.com/html/?q=golang",
+		Title:       "DuckDuckGo",
+		Results:     []Link{{Text: "Go — The Go Programming Language", URL: "https://go.dev", Rank: 1, Source: "result"}},
+		VisibleText: "results",
+		Truncated:   false,
+	}}
+	server := NewServer(DefaultLimits(), browser, log.New(io.Discard, "", 0))
+	raw := json.RawMessage(`{"name":"search_web","arguments":{"query":"golang","max_results":3,"engine":"duckduckgo"}}`)
 	result := server.callTool(context.Background(), raw)
 	if result.IsError {
 		t.Fatalf("callTool returned error result: %+v", result)
@@ -129,6 +164,15 @@ func TestCallToolForwardsActionsInOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(browser.last.Actions, want) {
 		t.Fatalf("expected actions %+v, got %+v", want, browser.last.Actions)
+	body := map[string]any{}
+	if err := json.Unmarshal([]byte(result.Text()), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["success"] != true || body["engine"] != searchEngineDuckDuckGo {
+		t.Fatalf("unexpected body: %+v", body)
+	}
+	if browser.lastSearch.Query != "golang" || browser.lastSearch.MaxResults != 3 || browser.lastSearch.Engine != searchEngineDuckDuckGo {
+		t.Fatalf("search request was not forwarded: %+v", browser.lastSearch)
 	}
 }
 
