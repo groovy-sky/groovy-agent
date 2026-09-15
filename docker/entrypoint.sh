@@ -114,6 +114,8 @@ fi
 
 LLAMA_SERVER_HOST="${LLAMA_SERVER_HOST:-0.0.0.0}"
 LLAMA_SERVER_PORT="${LLAMA_SERVER_PORT:-8080}"
+LLAMA_UPSTREAM_HOST="${LLAMA_UPSTREAM_HOST:-127.0.0.1}"
+LLAMA_UPSTREAM_PORT="${LLAMA_UPSTREAM_PORT:-18080}"
 LLAMA_MODEL_FILE="${LLAMA_MODEL_FILE:-Phi-4-mini-instruct.Q8_0.gguf}"
 LLAMA_MODEL_PATH="${LLAMA_MODEL_PATH:-/models/${LLAMA_MODEL_FILE}}"
 LLAMA_MODEL_NAME="${LLAMA_MODEL_NAME:-Phi-4-mini-instruct}"
@@ -194,6 +196,11 @@ LLAMA_MCP_COREUTILS="${LLAMA_MCP_COREUTILS:-1}"
 LLAMA_MCP_WORKSPACE="${LLAMA_MCP_WORKSPACE:-${MCP_WORKSPACE:-${AGENT_OUTPUT_DIR:-/output}}}"
 LLAMA_MCP_WEBUTILS="${LLAMA_MCP_WEBUTILS:-0}"
 AGENT_WEB_MCP_COMMAND="${AGENT_WEB_MCP_COMMAND:-}"
+AGENT_MAX_TOOL_CALLS_PER_TURN="${AGENT_MAX_TOOL_CALLS_PER_TURN:-3}"
+use_openai_proxy=0
+if [[ "$LLAMA_MCP_COREUTILS" != "0" || "$LLAMA_MCP_WEBUTILS" != "0" ]]; then
+  use_openai_proxy=1
+fi
 
 # llama-server's built-in Web UI has its own, separate MCP feature: from the
 # UI's Settings panel a user can register additional MCP servers directly in
@@ -261,7 +268,7 @@ has_positional_prompt() {
       -*=*)
         shift
         ;;
-      -llama-url|--llama-url|-model|--model|-mcp-command|--mcp-command|-web-mcp-command|--web-mcp-command|-workspace|--workspace)
+      -llama-url|--llama-url|-model|--model|-mcp-command|--mcp-command|-web-mcp-command|--web-mcp-command|-workspace|--workspace|-max-tool-calls-per-turn|--max-tool-calls-per-turn)
         shift
         if (( $# > 0 )); then
           shift
@@ -298,10 +305,17 @@ if [[ "$LLAMA_THREADS" == "0" ]]; then
   LLAMA_THREADS="$(nproc)"
 fi
 
+llama_bind_host="$LLAMA_SERVER_HOST"
+llama_bind_port="$LLAMA_SERVER_PORT"
+if [[ "$use_openai_proxy" == "1" ]]; then
+  llama_bind_host="$LLAMA_UPSTREAM_HOST"
+  llama_bind_port="$LLAMA_UPSTREAM_PORT"
+fi
+
 llama_args=(
   --jinja
-  --host "$LLAMA_SERVER_HOST"
-  --port "$LLAMA_SERVER_PORT"
+  --host "$llama_bind_host"
+  --port "$llama_bind_port"
   --model "$LLAMA_MODEL_PATH"
   --alias "$LLAMA_MODEL_NAME"
   --ctx-size "$LLAMA_CTX_SIZE"
@@ -379,10 +393,14 @@ fi
 
 /opt/llama/llama-server "${llama_args[@]}" &
 llama_pid=$!
+proxy_pid=""
 agent_pid=""
 
 shutdown() {
   kill -TERM "$llama_pid" 2>/dev/null || true
+  if [[ -n "$proxy_pid" ]]; then
+    kill -TERM "$proxy_pid" 2>/dev/null || true
+  fi
   if [[ -n "$agent_pid" ]]; then
     kill -TERM "$agent_pid" 2>/dev/null || true
   fi
@@ -391,8 +409,8 @@ trap shutdown INT TERM
 
 deadline=$((SECONDS + LLAMA_STARTUP_TIMEOUT))
 while true; do
-  if curl -fsS "http://${LLAMA_SERVER_HOST}:${LLAMA_SERVER_PORT}/health" >/dev/null 2>&1 || \
-     curl -fsS "http://${LLAMA_SERVER_HOST}:${LLAMA_SERVER_PORT}/v1/models" >/dev/null 2>&1; then
+  if curl -fsS "http://${llama_bind_host}:${llama_bind_port}/health" >/dev/null 2>&1 || \
+     curl -fsS "http://${llama_bind_host}:${llama_bind_port}/v1/models" >/dev/null 2>&1; then
     break
   fi
   if ! kill -0 "$llama_pid" 2>/dev/null; then
@@ -413,6 +431,39 @@ export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://${LLAMA_SERVER_HOST}:${LLAMA_S
 export OPENAI_MODEL="${OPENAI_MODEL:-$LLAMA_MODEL_NAME}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-local-llama}"
 
+if [[ "$use_openai_proxy" == "1" ]]; then
+  export OPENAI_PROXY_LISTEN_ADDR="${OPENAI_PROXY_LISTEN_ADDR:-${LLAMA_SERVER_HOST}:${LLAMA_SERVER_PORT}}"
+  export OPENAI_PROXY_UPSTREAM_URL="${OPENAI_PROXY_UPSTREAM_URL:-http://${llama_bind_host}:${llama_bind_port}}"
+  export OPENAI_PROXY_MCP_ENABLED=1
+  export OPENAI_PROXY_MAX_TOOL_CALLS_PER_TURN="${OPENAI_PROXY_MAX_TOOL_CALLS_PER_TURN:-${AGENT_MAX_TOOL_CALLS_PER_TURN}}"
+  export OPENAI_PROXY_DISABLE_DUPLICATE_TOOL_CALLS="${OPENAI_PROXY_DISABLE_DUPLICATE_TOOL_CALLS:-1}"
+  export OPENAI_PROXY_TOOLS_ERROR_CACHE_SECONDS="${OPENAI_PROXY_TOOLS_ERROR_CACHE_SECONDS:-${OPENAI_PROXY_TOOLS_CACHE_SECONDS:-10}}"
+  /usr/local/bin/openai-mcp-proxy &
+  proxy_pid=$!
+  proxy_deadline=$((SECONDS + 15))
+  while true; do
+    if curl -fsS "http://${LLAMA_SERVER_HOST}:${LLAMA_SERVER_PORT}/v1/models" >/dev/null 2>&1; then
+      break
+    fi
+    if ! kill -0 "$proxy_pid" 2>/dev/null; then
+      wait "$proxy_pid" || true
+      echo "openai-mcp-proxy exited before becoming ready" >&2
+      kill -TERM "$llama_pid" 2>/dev/null || true
+      wait "$llama_pid" || true
+      exit 1
+    fi
+    if (( SECONDS >= proxy_deadline )); then
+      echo "openai-mcp-proxy did not become ready within 15s" >&2
+      kill -TERM "$proxy_pid" 2>/dev/null || true
+      wait "$proxy_pid" || true
+      kill -TERM "$llama_pid" 2>/dev/null || true
+      wait "$llama_pid" || true
+      exit 1
+    fi
+    sleep 1
+  done
+fi
+
 if [[ "$agent_mode" == "serve" ]]; then
   # No positional prompt was supplied, so there is nothing for the one-shot
   # agent to do.  Keep llama-server running as an OpenAI-compatible API server
@@ -422,14 +473,36 @@ if [[ "$agent_mode" == "serve" ]]; then
   echo "publish it with 'docker run -p 8080:8080 ...'" >&2
   echo "to run a one-shot agent request instead, append a prompt, e.g." >&2
   echo "  docker run --rm ... groovy-agent:local --workspace /output \"what is today's date?\"" >&2
+  if [[ -n "$proxy_pid" ]]; then
+    while true; do
+      if ! kill -0 "$llama_pid" 2>/dev/null; then
+        wait "$llama_pid" || true
+        kill -TERM "$proxy_pid" 2>/dev/null || true
+        wait "$proxy_pid" || true
+        echo "llama-server exited unexpectedly" >&2
+        exit 1
+      fi
+      if ! kill -0 "$proxy_pid" 2>/dev/null; then
+        set +e
+        wait "$proxy_pid"
+        status=$?
+        set -e
+        kill -TERM "$llama_pid" 2>/dev/null || true
+        wait "$llama_pid" || true
+        exit "$status"
+      fi
+      sleep 1
+    done
+  fi
   wait_for_exit_status "$llama_pid"
   exit "$wait_status"
 fi
 
 agent_args=(
-  --llama-url "http://${LLAMA_SERVER_HOST}:${LLAMA_SERVER_PORT}"
+  --llama-url "http://$([[ -n "$proxy_pid" ]] && printf '%s' "$LLAMA_SERVER_HOST:$LLAMA_SERVER_PORT" || printf '%s' "$llama_bind_host:$llama_bind_port")"
   --model "$LLAMA_MODEL_NAME"
   --mcp-command /usr/local/bin/coreutils-mcp
+  --max-tool-calls-per-turn "$AGENT_MAX_TOOL_CALLS_PER_TURN"
 )
 if [[ -n "$AGENT_WEB_MCP_COMMAND" ]]; then
   agent_args+=(--web-mcp-command "$AGENT_WEB_MCP_COMMAND")
@@ -442,6 +515,10 @@ agent_pid=$!
 while true; do
   if ! kill -0 "$llama_pid" 2>/dev/null; then
     wait "$llama_pid" || true
+    if [[ -n "$proxy_pid" ]]; then
+      kill -TERM "$proxy_pid" 2>/dev/null || true
+      wait "$proxy_pid" || true
+    fi
     kill -TERM "$agent_pid" 2>/dev/null || true
     wait "$agent_pid" || true
     echo "llama-server exited unexpectedly" >&2
@@ -454,6 +531,10 @@ while true; do
     set -e
     kill -TERM "$llama_pid" 2>/dev/null || true
     wait "$llama_pid" || true
+    if [[ -n "$proxy_pid" ]]; then
+      kill -TERM "$proxy_pid" 2>/dev/null || true
+      wait "$proxy_pid" || true
+    fi
     exit "$status"
   fi
   sleep 1

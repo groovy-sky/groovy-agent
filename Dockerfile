@@ -11,7 +11,8 @@ COPY internal ./internal
 COPY webutils ./webutils
 RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -trimpath -ldflags='-s -w' -o /out/groovy-agent ./cmd/agent \
     && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -trimpath -ldflags='-s -w' -o /out/coreutils-mcp ./cmd/coreutils-mcp \
-    && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -trimpath -ldflags='-s -w' -o /out/webutils-mcp ./cmd/webutils-mcp
+    && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -trimpath -ldflags='-s -w' -o /out/webutils-mcp ./cmd/webutils-mcp \
+    && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -trimpath -ldflags='-s -w' -o /out/openai-mcp-proxy ./cmd/openai-mcp-proxy
 
 FROM ghcr.io/ggml-org/llama.cpp:server@sha256:092d1291f2bcf59ff727fa3af855fb9bd4759d6bff860f6fbfd5e3e377e12625 AS llama-runtime
 
@@ -114,6 +115,7 @@ ENV LLAMA_SERVER_HOST=0.0.0.0 \
 COPY --from=go-builder /out/groovy-agent /usr/local/bin/groovy-agent
 COPY --from=go-builder /out/coreutils-mcp /usr/local/bin/coreutils-mcp
 COPY --from=go-builder /out/webutils-mcp /usr/local/bin/webutils-mcp
+COPY --from=go-builder /out/openai-mcp-proxy /usr/local/bin/openai-mcp-proxy
 COPY --from=llama-runtime /app /opt/llama
 COPY --from=model-fetch /models/ /models/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
