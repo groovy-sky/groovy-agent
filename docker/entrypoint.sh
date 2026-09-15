@@ -437,8 +437,31 @@ if [[ "$use_openai_proxy" == "1" ]]; then
   export OPENAI_PROXY_MCP_ENABLED=1
   export OPENAI_PROXY_MAX_TOOL_CALLS_PER_TURN="${OPENAI_PROXY_MAX_TOOL_CALLS_PER_TURN:-${AGENT_MAX_TOOL_CALLS_PER_TURN}}"
   export OPENAI_PROXY_DISABLE_DUPLICATE_TOOL_CALLS="${OPENAI_PROXY_DISABLE_DUPLICATE_TOOL_CALLS:-1}"
+  export OPENAI_PROXY_TOOLS_ERROR_CACHE_SECONDS="${OPENAI_PROXY_TOOLS_ERROR_CACHE_SECONDS:-${OPENAI_PROXY_TOOLS_CACHE_SECONDS:-10}}"
   /usr/local/bin/openai-mcp-proxy &
   proxy_pid=$!
+  proxy_deadline=$((SECONDS + 15))
+  while true; do
+    if curl -fsS "http://${LLAMA_SERVER_HOST}:${LLAMA_SERVER_PORT}/v1/models" >/dev/null 2>&1; then
+      break
+    fi
+    if ! kill -0 "$proxy_pid" 2>/dev/null; then
+      wait "$proxy_pid" || true
+      echo "openai-mcp-proxy exited before becoming ready" >&2
+      kill -TERM "$llama_pid" 2>/dev/null || true
+      wait "$llama_pid" || true
+      exit 1
+    fi
+    if (( SECONDS >= proxy_deadline )); then
+      echo "openai-mcp-proxy did not become ready within 15s" >&2
+      kill -TERM "$proxy_pid" 2>/dev/null || true
+      wait "$proxy_pid" || true
+      kill -TERM "$llama_pid" 2>/dev/null || true
+      wait "$llama_pid" || true
+      exit 1
+    fi
+    sleep 1
+  done
 fi
 
 if [[ "$agent_mode" == "serve" ]]; then
@@ -476,7 +499,7 @@ if [[ "$agent_mode" == "serve" ]]; then
 fi
 
 agent_args=(
-  --llama-url "http://${llama_bind_host}:${llama_bind_port}"
+  --llama-url "http://$([[ -n "$proxy_pid" ]] && printf '%s' "$LLAMA_SERVER_HOST:$LLAMA_SERVER_PORT" || printf '%s' "$llama_bind_host:$llama_bind_port")"
   --model "$LLAMA_MODEL_NAME"
   --mcp-command /usr/local/bin/coreutils-mcp
   --max-tool-calls-per-turn "$AGENT_MAX_TOOL_CALLS_PER_TURN"

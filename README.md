@@ -725,6 +725,9 @@ Container/`docker/entrypoint.sh` environment variables:
   upstream URL the OpenAI proxy forwards requests to.
 - `OPENAI_PROXY_TOOLS_CACHE_SECONDS` (default `10`): cache TTL for MCP tool
   discovery from `/tools` before the next refresh.
+- `OPENAI_PROXY_TOOLS_ERROR_CACHE_SECONDS` (default
+  `OPENAI_PROXY_TOOLS_CACHE_SECONDS`): retry delay for failed `/tools`
+  discovery attempts.
 - `OPENAI_PROXY_MAX_TOOL_CALLS_PER_TURN` (default from
   `AGENT_MAX_TOOL_CALLS_PER_TURN`, default `3`): max tool calls allowed in one
   assistant turn before the proxy emits a bounded partial-completion message.

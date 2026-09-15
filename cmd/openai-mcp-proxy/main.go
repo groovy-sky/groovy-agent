@@ -21,6 +21,7 @@ func main() {
 	maxCalls := envInt("OPENAI_PROXY_MAX_TOOL_CALLS_PER_TURN", 3)
 	disableDuplicates := envBool("OPENAI_PROXY_DISABLE_DUPLICATE_TOOL_CALLS", true)
 	cacheTTL := time.Duration(envInt("OPENAI_PROXY_TOOLS_CACHE_SECONDS", 10)) * time.Second
+	errorCacheTTL := time.Duration(envInt("OPENAI_PROXY_TOOLS_ERROR_CACHE_SECONDS", 0)) * time.Second
 
 	logger := log.New(os.Stderr, "openai-mcp-proxy: ", 0)
 	proxy, err := openaiproxy.New(openaiproxy.Config{
@@ -28,6 +29,7 @@ func main() {
 		MCPEnabled:                mcpEnabled,
 		MaxToolCallsPerTurn:       maxCalls,
 		ToolsCacheTTL:             cacheTTL,
+		ToolsErrorCacheTTL:        errorCacheTTL,
 		DisableDuplicateToolCalls: disableDuplicates,
 	}, logger)
 	if err != nil {

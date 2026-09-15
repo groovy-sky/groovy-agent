@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -27,6 +28,7 @@ type Config struct {
 	MCPEnabled                bool
 	MaxToolCallsPerTurn       int
 	ToolsCacheTTL             time.Duration
+	ToolsErrorCacheTTL        time.Duration
 	DisableDuplicateToolCalls bool
 }
 
@@ -38,9 +40,13 @@ type Proxy struct {
 	maxToolCallsPerTurn       int
 	disableDuplicateToolCalls bool
 	toolsCacheTTL             time.Duration
+	toolsErrorCacheTTL        time.Duration
 	logger                    *log.Logger
 
 	mu               sync.Mutex
+	cacheValid       bool
+	fetchInFlight    bool
+	fetchDone        chan struct{}
 	cachedTools      []any
 	cachedToolsAt    time.Time
 	cachedToolsErr   error
@@ -59,6 +65,10 @@ func New(config Config, logger *log.Logger) (*Proxy, error) {
 	if ttl <= 0 {
 		ttl = defaultToolsCacheTTL
 	}
+	errorTTL := config.ToolsErrorCacheTTL
+	if errorTTL <= 0 {
+		errorTTL = ttl
+	}
 	maxCalls := config.MaxToolCallsPerTurn
 	if maxCalls <= 0 {
 		maxCalls = 3
@@ -72,6 +82,7 @@ func New(config Config, logger *log.Logger) (*Proxy, error) {
 		maxToolCallsPerTurn:       maxCalls,
 		disableDuplicateToolCalls: config.DisableDuplicateToolCalls,
 		toolsCacheTTL:             ttl,
+		toolsErrorCacheTTL:        errorTTL,
 		logger:                    logger,
 	}, nil
 }
@@ -103,6 +114,7 @@ func (p *Proxy) handleChatCompletions(writer http.ResponseWriter, request *http.
 		p.forwardRaw(writer, request, body)
 		return
 	}
+	streaming := requestWantsStreaming(payload)
 
 	if p.mcpEnabled && !hasUsableTools(payload) {
 		tools, err := p.getOpenAITools(request.Context())
@@ -110,15 +122,21 @@ func (p *Proxy) handleChatCompletions(writer http.ResponseWriter, request *http.
 			p.writeDiagnosticCompletion(writer, payload, err)
 			return
 		}
-		payload["tools"] = tools
-		if _, hasChoice := payload["tool_choice"]; !hasChoice {
-			payload["tool_choice"] = "auto"
+		if len(tools) > 0 {
+			payload["tools"] = tools
+			if _, hasChoice := payload["tool_choice"]; !hasChoice {
+				payload["tool_choice"] = "auto"
+			}
 		}
 	}
 
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		http.Error(writer, "request JSON encoding failed", http.StatusBadRequest)
+		return
+	}
+	if streaming {
+		p.forwardStreamingResponse(writer, request, encoded)
 		return
 	}
 
@@ -140,15 +158,29 @@ func (p *Proxy) handleChatCompletions(writer http.ResponseWriter, request *http.
 	}
 	copyHeaders(headers, response.Header)
 
-	if response.StatusCode == http.StatusOK {
+	if !streaming && response.StatusCode == http.StatusOK && strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "application/json") {
 		guarded, changed := p.applyToolCallGuards(responseBody)
 		if changed {
 			responseBody = guarded
+			headers.Del("Content-Length")
 		}
 	}
 
 	writer.WriteHeader(response.StatusCode)
 	_, _ = writer.Write(responseBody)
+}
+
+func (p *Proxy) forwardStreamingResponse(writer http.ResponseWriter, request *http.Request, body []byte) {
+	response, err := p.forwardJSON(request.Context(), request, body)
+	if err != nil {
+		http.Error(writer, fmt.Sprintf("upstream request failed: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer response.Body.Close()
+	copyHeaders(writer.Header(), response.Header)
+	writer.Header().Set("X-Groovy-Agent-Tool-Guard", "disabled_for_streaming_requests")
+	writer.WriteHeader(response.StatusCode)
+	_, _ = io.Copy(writer, response.Body)
 }
 
 func (p *Proxy) forwardRaw(writer http.ResponseWriter, request *http.Request, body []byte) {
@@ -174,6 +206,7 @@ func (p *Proxy) forwardJSON(ctx context.Context, request *http.Request, body []b
 		return nil, err
 	}
 	copyHeaders(forward.Header, request.Header)
+	forward.Header.Del("Host")
 	forward.Host = p.upstream.Host
 	forward.ContentLength = int64(len(body))
 
@@ -198,38 +231,69 @@ func hasUsableTools(payload map[string]any) bool {
 	return ok && len(tools) > 0
 }
 
-func (p *Proxy) getOpenAITools(ctx context.Context) ([]any, error) {
-	now := time.Now()
+func requestWantsStreaming(payload map[string]any) bool {
+	stream, ok := payload["stream"].(bool)
+	return ok && stream
+}
 
-	p.mu.Lock()
-	if len(p.cachedTools) > 0 && now.Sub(p.cachedToolsAt) < p.toolsCacheTTL {
+func (p *Proxy) getOpenAITools(ctx context.Context) ([]any, error) {
+	for {
+		now := time.Now()
+		p.mu.Lock()
+		if p.cacheValid && now.Sub(p.cachedToolsAt) < p.toolsCacheTTL {
+			cached := append([]any(nil), p.cachedTools...)
+			p.mu.Unlock()
+			return cached, nil
+		}
+		if p.cachedToolsErr != nil && now.Sub(p.cachedToolsErrAt) < p.toolsErrorCacheTTL {
+			err := p.cachedToolsErr
+			p.mu.Unlock()
+			return nil, err
+		}
+		if p.fetchInFlight {
+			done := p.fetchDone
+			p.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-done:
+				continue
+			}
+		}
+		p.fetchInFlight = true
+		p.fetchDone = make(chan struct{})
+		p.mu.Unlock()
+
+		tools, err := p.fetchOpenAITools(ctx)
+		completedAt := time.Now()
+
+		p.mu.Lock()
+		p.fetchInFlight = false
+		close(p.fetchDone)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				p.cachedToolsErr = err
+				p.cachedToolsErrAt = completedAt
+			}
+			p.mu.Unlock()
+			return nil, err
+		}
+		p.cachedTools = append([]any(nil), tools...)
+		p.cachedToolsAt = completedAt
+		p.cacheValid = true
+		p.cachedToolsErr = nil
 		cached := append([]any(nil), p.cachedTools...)
 		p.mu.Unlock()
 		return cached, nil
 	}
-	if p.cachedToolsErr != nil && now.Sub(p.cachedToolsErrAt) < time.Second {
-		err := p.cachedToolsErr
-		p.mu.Unlock()
-		return nil, err
-	}
-	p.mu.Unlock()
-
-	tools, err := p.fetchOpenAITools(ctx)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if err != nil {
-		p.cachedToolsErr = err
-		p.cachedToolsErrAt = now
-		return nil, err
-	}
-	p.cachedTools = append([]any(nil), tools...)
-	p.cachedToolsAt = now
-	p.cachedToolsErr = nil
-	return append([]any(nil), p.cachedTools...), nil
 }
 
 func (p *Proxy) fetchOpenAITools(ctx context.Context) ([]any, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.upstream.String()+"/tools", nil)
+	target := *p.upstream
+	target.Path = "/tools"
+	target.RawPath = ""
+	target.RawQuery = ""
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +334,7 @@ func parseOpenAITools(payload []byte) ([]any, error) {
 		result = append(result, adapted)
 	}
 	if len(result) == 0 {
-		return nil, fmt.Errorf("/tools returned no usable function definitions")
+		return []any{}, nil
 	}
 	sort.SliceStable(result, func(i, j int) bool {
 		left := result[i].(map[string]any)["function"].(map[string]any)["name"].(string)
@@ -348,7 +412,7 @@ func firstSchema(tool map[string]any, keys ...string) map[string]any {
 
 func (p *Proxy) writeDiagnosticCompletion(writer http.ResponseWriter, requestPayload map[string]any, err error) {
 	message := "Tool bridge temporarily unavailable: MCP tools are enabled, but automatic tool exposure for this request failed. " +
-		"Please retry shortly or call GET /tools to inspect currently available tools. Diagnostic: " + err.Error()
+		"Please retry shortly or call GET /tools to inspect currently available tools. Diagnostic: " + sanitizeBridgeError(err)
 	p.logger.Printf("tool bridge error: %v", err)
 	model, _ := requestPayload["model"].(string)
 	response := map[string]any{
@@ -368,6 +432,25 @@ func (p *Proxy) writeDiagnosticCompletion(writer http.ResponseWriter, requestPay
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(writer).Encode(response)
+}
+
+func sanitizeBridgeError(err error) string {
+	if err == nil {
+		return "tool discovery failed"
+	}
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "/tools returned status "):
+		return message
+	case strings.Contains(message, "parse /tools JSON"):
+		return "tools endpoint returned invalid JSON"
+	case strings.Contains(message, "does not include a tool list"):
+		return "tools endpoint response did not include a tool list"
+	case strings.Contains(message, "no usable function definitions"):
+		return "tools endpoint returned no callable function definitions"
+	default:
+		return "tools endpoint unavailable"
+	}
 }
 
 func (p *Proxy) applyToolCallGuards(responseBody []byte) ([]byte, bool) {
@@ -407,8 +490,10 @@ func (p *Proxy) applyToolCallGuards(responseBody []byte) ([]byte, bool) {
 		key := toolCallKey(call)
 		if p.disableDuplicateToolCalls {
 			if _, exists := seen[key]; exists {
-				guardReason = "partial completion: duplicate tool call detected in the same assistant turn"
-				break
+				if guardReason == "" {
+					guardReason = "partial completion: duplicate tool call detected in the same assistant turn"
+				}
+				continue
 			}
 			seen[key] = struct{}{}
 		}
@@ -425,10 +510,11 @@ func (p *Proxy) applyToolCallGuards(responseBody []byte) ([]byte, bool) {
 		message["tool_calls"] = filtered
 		content, _ := message["content"].(string)
 		if strings.TrimSpace(content) == "" {
-			message["content"] = guardReason + ". Executing a bounded subset of tool calls."
+			message["content"] = guardReason + ". Continuing with the remaining distinct tool calls."
 		} else {
-			message["content"] = strings.TrimSpace(content) + "\n\n" + guardReason + "."
+			message["content"] = strings.TrimSpace(content) + "\n\n" + guardReason + ". Continuing with the remaining distinct tool calls."
 		}
+		choice["finish_reason"] = "tool_calls"
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
