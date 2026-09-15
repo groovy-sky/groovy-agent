@@ -98,21 +98,11 @@ func (s *Server) dispatch(ctx context.Context, output io.Writer, request mcpprot
 
 func (s *Server) listTools() mcpproto.ListToolsResult {
 	return mcpproto.ListToolsResult{
-		Tools: []mcpproto.Tool{{
-			Name:        toolNameBrowseURL,
-			Description: "Browse one public HTTPS page with a fresh headless Chromium instance, optionally execute sequential CSS-selector actions after navigation, and return bounded extracted content, visible text, links, and optional screenshot.",
-			InputSchema: mustJSON(inputSchema(s.limits)),
-		}},
-	}
-}
-
-func inputSchema(limits Limits) map[string]any {
-	limits = normalizeLimits(limits)
 		Tools: []mcpproto.Tool{
 			{
 				Name:        toolNameBrowseURL,
-				Description: "Browse one public HTTPS page with a fresh headless Chromium instance and return bounded extracted content, visible text, links, and optional screenshot.",
-				InputSchema: mustJSON(inputSchemaBrowse()),
+				Description: "Browse one public HTTPS page with a fresh headless Chromium instance, optionally execute sequential CSS-selector actions after navigation, and return bounded extracted content, visible text, links, and optional screenshot.",
+				InputSchema: mustJSON(inputSchema(s.limits)),
 			},
 			{
 				Name:        toolNameSearchWeb,
@@ -123,7 +113,8 @@ func inputSchema(limits Limits) map[string]any {
 	}
 }
 
-func inputSchemaBrowse() map[string]any {
+func inputSchema(limits Limits) map[string]any {
+	limits = normalizeLimits(limits)
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -274,45 +265,9 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) mcpproto.Cal
 	if err := json.Unmarshal(raw, &params); err != nil {
 		return errorResult(mcpproto.ErrorInvalidArguments, "tool call parameters are not a JSON object")
 	}
-	if params.Name != toolNameBrowseURL {
-		return errorResult(mcpproto.ErrorUnknownTool, "tool is not available")
-	}
-	arguments, err := jsonschema.ValidateRaw(inputSchema(s.limits), params.Arguments)
-	if err != nil {
-		return errorResult(mcpproto.ErrorInvalidArguments, err.Error())
-	}
-	request := BrowseRequest{
-		URL:               arguments["url"].(string),
-		MaxTextChars:      optionalInt(arguments, "max_text_chars"),
-		CaptureScreenshot: optionalBool(arguments, "capture_screenshot"),
-		ScreenshotMode:    optionalString(arguments, "screenshot_mode"),
-		Actions:           optionalBrowserActions(arguments, "actions"),
-	}
-	result, err := s.browser.Browse(ctx, request)
-	if err != nil {
-		category, message := classifyError(err)
-		return errorResult(category, message)
-	}
-	body := map[string]any{
-		"success":           true,
-		"final_url":         result.FinalURL,
-		"title":             result.Title,
-		"content":           result.Content,
-		"content_format":    result.ContentFormat,
-		"extraction_method": result.ExtractionMethod,
-		"visible_text":      result.VisibleText,
-		"links":             result.Links,
-		"truncated":         result.Truncated,
-	}
-	content := []mcpproto.Content{{Type: "text", Text: encode(body)}}
-	if len(result.ScreenshotPNG) > 0 {
-		content = append(content, mcpproto.Content{
-			Type:     "image",
-			Data:     base64.StdEncoding.EncodeToString(result.ScreenshotPNG),
-			MIMEType: "image/png",
 	switch params.Name {
 	case toolNameBrowseURL:
-		arguments, err := jsonschema.ValidateRaw(inputSchemaBrowse(), params.Arguments)
+		arguments, err := jsonschema.ValidateRaw(inputSchema(s.limits), params.Arguments)
 		if err != nil {
 			return errorResult(mcpproto.ErrorInvalidArguments, err.Error())
 		}
@@ -321,6 +276,7 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) mcpproto.Cal
 			MaxTextChars:      optionalInt(arguments, "max_text_chars"),
 			CaptureScreenshot: optionalBool(arguments, "capture_screenshot"),
 			ScreenshotMode:    optionalString(arguments, "screenshot_mode"),
+			Actions:           optionalBrowserActions(arguments, "actions"),
 		}
 		result, err := s.browser.Browse(ctx, request)
 		if err != nil {

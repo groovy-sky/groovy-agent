@@ -140,6 +140,21 @@ func TestCallToolForwardsActionsInOrder(t *testing.T) {
 	browser := &fakeBrowser{result: BrowseResult{FinalURL: "https://example.com"}}
 	server := NewServer(DefaultLimits(), browser, log.New(io.Discard, "", 0))
 	raw := json.RawMessage(`{"name":"browse_url","arguments":{"url":"https://example.com","actions":[{"type":"wait_visible","selector":"#login"},{"type":"set_value","selector":"input[name=email]","value":"user@example.com"},{"type":"type","selector":"input[name=password]","value":"secret"},{"type":"click","selector":"button[type=submit]"}]}}`)
+	result := server.callTool(context.Background(), raw)
+	if result.IsError {
+		t.Fatalf("callTool returned error result: %+v", result)
+	}
+	want := []BrowserAction{
+		{Type: browserActionWaitVisible, Selector: "#login"},
+		{Type: browserActionSetValue, Selector: "input[name=email]", Value: "user@example.com"},
+		{Type: browserActionType, Selector: "input[name=password]", Value: "secret"},
+		{Type: browserActionClick, Selector: "button[type=submit]"},
+	}
+	if !reflect.DeepEqual(browser.last.Actions, want) {
+		t.Fatalf("expected actions %+v, got %+v", want, browser.last.Actions)
+	}
+}
+
 func TestCallToolSearchSuccess(t *testing.T) {
 	browser := &fakeBrowser{searchResult: SearchResult{
 		Engine:      searchEngineDuckDuckGo,
@@ -156,14 +171,6 @@ func TestCallToolSearchSuccess(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("callTool returned error result: %+v", result)
 	}
-	want := []BrowserAction{
-		{Type: browserActionWaitVisible, Selector: "#login"},
-		{Type: browserActionSetValue, Selector: "input[name=email]", Value: "user@example.com"},
-		{Type: browserActionType, Selector: "input[name=password]", Value: "secret"},
-		{Type: browserActionClick, Selector: "button[type=submit]"},
-	}
-	if !reflect.DeepEqual(browser.last.Actions, want) {
-		t.Fatalf("expected actions %+v, got %+v", want, browser.last.Actions)
 	body := map[string]any{}
 	if err := json.Unmarshal([]byte(result.Text()), &body); err != nil {
 		t.Fatalf("decode response: %v", err)
