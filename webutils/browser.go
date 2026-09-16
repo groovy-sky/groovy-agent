@@ -803,7 +803,6 @@ func chromedpActionsForBrowserAction(index int, action BrowserAction, mouse *mou
 			wrapBrowserAction(index, actionType,
 				chromedp.WaitVisible(selector, chromedp.ByQuery),
 				humanHover(selector, index, mouse),
-				humanMouseClick(mouse),
 				chromedp.Focus(selector, chromedp.ByQuery),
 				humanType(action.Value),
 			),
