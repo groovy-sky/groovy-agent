@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/commonmark"
 	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/table"
 	"github.com/chromedp/cdproto/fetch"
+	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 	"golang.org/x/net/html"
@@ -53,6 +56,7 @@ const (
 
 const (
 	browserActionWaitVisible = "wait_visible"
+	browserActionHover       = "hover"
 	browserActionClick       = "click"
 	browserActionSetValue    = "set_value"
 	browserActionType        = "type"
@@ -176,6 +180,19 @@ type Browser interface {
 type ChromiumBrowser struct {
 	limits   Limits
 	resolver policyResolver
+}
+
+type mousePosition struct {
+	x           float64
+	y           float64
+	initialized bool
+}
+
+type elementBox struct {
+	Left   float64 `json:"left"`
+	Top    float64 `json:"top"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
 }
 
 func NewChromiumBrowser(limits Limits) *ChromiumBrowser {
@@ -306,11 +323,12 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 		rawLinks      []map[string]string
 		screenshotPNG []byte
 	)
+	mouse := &mousePosition{}
 	actions := []chromedp.Action{
 		chromedp.Navigate(targetURL.String()),
 	}
 	for i, action := range req.Actions {
-		steps, err := chromedpActionsForBrowserAction(i, action)
+		steps, err := chromedpActionsForBrowserAction(i, action, mouse)
 		if err != nil {
 			return BrowseResult{}, err
 		}
@@ -731,7 +749,7 @@ func validateBrowserActions(actions []BrowserAction, limits Limits) error {
 		}
 		trimmedValue := strings.TrimSpace(action.Value)
 		switch actionType {
-		case browserActionWaitVisible, browserActionClick:
+		case browserActionWaitVisible, browserActionHover, browserActionClick:
 			if trimmedValue != "" {
 				return fmt.Errorf("browser action %d (%s) does not accept a value", i+1, actionType)
 			}
@@ -749,7 +767,7 @@ func validateBrowserActions(actions []BrowserAction, limits Limits) error {
 	return nil
 }
 
-func chromedpActionsForBrowserAction(index int, action BrowserAction) ([]chromedp.Action, error) {
+func chromedpActionsForBrowserAction(index int, action BrowserAction, mouse *mousePosition) ([]chromedp.Action, error) {
 	actionType := strings.TrimSpace(action.Type)
 	selector := strings.TrimSpace(action.Selector)
 	switch actionType {
@@ -757,11 +775,19 @@ func chromedpActionsForBrowserAction(index int, action BrowserAction) ([]chromed
 		return []chromedp.Action{
 			wrapBrowserAction(index, actionType, chromedp.WaitVisible(selector, chromedp.ByQuery)),
 		}, nil
+	case browserActionHover:
+		return []chromedp.Action{
+			wrapBrowserAction(index, actionType,
+				chromedp.WaitVisible(selector, chromedp.ByQuery),
+				humanHover(selector, index, mouse),
+			),
+		}, nil
 	case browserActionClick:
 		return []chromedp.Action{
 			wrapBrowserAction(index, actionType,
 				chromedp.WaitVisible(selector, chromedp.ByQuery),
-				chromedp.Click(selector, chromedp.ByQuery),
+				humanHover(selector, index, mouse),
+				humanMouseClick(mouse),
 				waitForStablePage(),
 			),
 		}, nil
@@ -776,8 +802,9 @@ func chromedpActionsForBrowserAction(index int, action BrowserAction) ([]chromed
 		return []chromedp.Action{
 			wrapBrowserAction(index, actionType,
 				chromedp.WaitVisible(selector, chromedp.ByQuery),
+				humanHover(selector, index, mouse),
 				chromedp.Focus(selector, chromedp.ByQuery),
-				chromedp.SendKeys(selector, action.Value, chromedp.ByQuery),
+				humanType(action.Value),
 			),
 		}, nil
 	default:
@@ -794,6 +821,177 @@ func wrapBrowserAction(index int, actionType string, actions ...chromedp.Action)
 		}
 		return nil
 	})
+}
+
+func humanHover(selector string, index int, mouse *mousePosition) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		box, err := resolveElementBox(ctx, selector)
+		if err != nil {
+			return err
+		}
+		targetX, targetY := targetPointForElement(index, selector, box)
+		if err := moveMouse(ctx, mouse, targetX, targetY); err != nil {
+			return err
+		}
+		return chromedp.Sleep(35 * time.Millisecond).Do(ctx)
+	})
+}
+
+func humanMouseClick(mouse *mousePosition) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		if mouse == nil || !mouse.initialized {
+			return errors.New("mouse target is not initialized")
+		}
+		x, y := mouse.x, mouse.y
+		if err := chromedp.Sleep(45 * time.Millisecond).Do(ctx); err != nil {
+			return err
+		}
+		if err := input.DispatchMouseEvent(input.MousePressed, x, y).
+			WithButton(input.Left).
+			WithButtons(1).
+			WithClickCount(1).
+			WithPointerType(input.Mouse).
+			Do(ctx); err != nil {
+			return err
+		}
+		if err := chromedp.Sleep(55 * time.Millisecond).Do(ctx); err != nil {
+			return err
+		}
+		if err := input.DispatchMouseEvent(input.MouseReleased, x, y).
+			WithButton(input.Left).
+			WithClickCount(1).
+			WithPointerType(input.Mouse).
+			Do(ctx); err != nil {
+			return err
+		}
+		return chromedp.Sleep(30 * time.Millisecond).Do(ctx)
+	})
+}
+
+func humanType(value string) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		runes := []rune(value)
+		for i, r := range runes {
+			if err := input.InsertText(string(r)).Do(ctx); err != nil {
+				return err
+			}
+			if i == len(runes)-1 {
+				continue
+			}
+			if err := chromedp.Sleep(humanTypeDelay(i)).Do(ctx); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func resolveElementBox(ctx context.Context, selector string) (elementBox, error) {
+	var box elementBox
+	script := fmt.Sprintf(`(() => {
+		const el = document.querySelector(%s);
+		if (!el) {
+			throw new Error("selector not found");
+		}
+		el.scrollIntoView({block: "center", inline: "center", behavior: "auto"});
+		const rect = el.getBoundingClientRect();
+		if (!rect || rect.width <= 0 || rect.height <= 0) {
+			throw new Error("selector is not interactable");
+		}
+		return {left: rect.left, top: rect.top, width: rect.width, height: rect.height};
+	})()`, strconv.Quote(selector))
+	if err := chromedp.Evaluate(script, &box).Do(ctx); err != nil {
+		return elementBox{}, err
+	}
+	if box.Width <= 0 || box.Height <= 0 {
+		return elementBox{}, errors.New("selector is not interactable")
+	}
+	return box, nil
+}
+
+func targetPointForElement(index int, selector string, box elementBox) (float64, float64) {
+	if box.Width <= 12 || box.Height <= 12 {
+		return box.Left + box.Width/2, box.Top + box.Height/2
+	}
+	seed := index + 1
+	for _, r := range selector {
+		seed += int(r)
+	}
+	xFactor := 0.35 + float64(seed%25)/100
+	yFactor := 0.38 + float64((seed/3)%20)/100
+	x := box.Left + clampFloat(box.Width*xFactor, 6, box.Width-6)
+	y := box.Top + clampFloat(box.Height*yFactor, 6, box.Height-6)
+	return x, y
+}
+
+func moveMouse(ctx context.Context, mouse *mousePosition, targetX, targetY float64) error {
+	startX, startY := targetX, targetY
+	if mouse != nil && mouse.initialized {
+		startX, startY = mouse.x, mouse.y
+	} else {
+		startX = math.Max(0, targetX-math.Min(96, math.Max(28, targetX/3)))
+		startY = math.Max(0, targetY-math.Min(72, math.Max(20, targetY/4)))
+	}
+	dx, dy := targetX-startX, targetY-startY
+	distance := math.Hypot(dx, dy)
+	steps := clampInt(int(distance/35)+6, 6, 18)
+	perpX, perpY := 0.0, 0.0
+	if distance > 0 {
+		perpX = -dy / distance
+		perpY = dx / distance
+	}
+	curve := math.Min(18, distance/6) * 0.35
+	for step := 1; step <= steps; step++ {
+		t := float64(step) / float64(steps)
+		eased := t * t * (3 - 2*t)
+		sway := math.Sin(math.Pi*t) * curve
+		x := math.Max(0, startX+dx*eased+perpX*sway)
+		y := math.Max(0, startY+dy*eased+perpY*sway)
+		if err := input.DispatchMouseEvent(input.MouseMoved, x, y).
+			WithPointerType(input.Mouse).
+			Do(ctx); err != nil {
+			return err
+		}
+		if step < steps {
+			if err := chromedp.Sleep(humanMouseStepDelay(step)).Do(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	if mouse != nil {
+		mouse.x = targetX
+		mouse.y = targetY
+		mouse.initialized = true
+	}
+	return nil
+}
+
+func humanMouseStepDelay(step int) time.Duration {
+	return time.Duration(10+(step%4)*4) * time.Millisecond
+}
+
+func humanTypeDelay(index int) time.Duration {
+	return time.Duration(22+(index%5)*9) * time.Millisecond
+}
+
+func clampInt(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func clampFloat(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 func waitForStablePage() chromedp.Action {

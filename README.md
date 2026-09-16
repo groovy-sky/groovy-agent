@@ -643,14 +643,19 @@ Agent CLI flags (`cmd/agent`):
   - `max_text_chars` (optional, bounded)
   - `capture_screenshot` (optional, default `false`)
   - `screenshot_mode` (optional: `viewport` or `full_page`)
+  - `actions` (optional, bounded sequential selector actions; supported types:
+    `wait_visible`, `hover`, `click`, `set_value`, `type`)
 - `browse_url` returns:
   - structured text metadata (`final_url`, `title`, `content`,
     `content_format`, `extraction_method`, `visible_text`, `links`,
     `truncated`) as an MCP text content block
   - optional PNG screenshot as a separate MCP image content block when
     `capture_screenshot` is true
-- current webutils behavior is deterministic URL navigation; it does not
-  expose arbitrary click/type interaction primitives.
+- actions stay closed-schema and selector-based; `webutils-mcp` does not expose
+  arbitrary JavaScript, unrestricted coordinates, or raw CDP access.
+- hover/click/type are executed server-side with bounded Chromium input events,
+  including mouse movement before clicks, while preserving the existing
+  HTTPS/public-destination network policy.
 - `WEBUTILS_CHROME_EXECUTABLE` (default unset outside Docker): optional absolute
   Chrome/Chromium executable override. The bundled container image sets it to
   `/usr/bin/chromium`, which wraps the bundled Debian Chromium payload and its

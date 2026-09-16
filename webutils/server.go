@@ -113,7 +113,8 @@ func (s *Server) listTools() mcpproto.ListToolsResult {
 	}
 }
 
-func inputSchema(_ Limits) map[string]any {
+func inputSchema(limits Limits) map[string]any {
+	limits = normalizeLimits(limits)
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -137,6 +138,34 @@ func inputSchema(_ Limits) map[string]any {
 				"type":        "string",
 				"description": "Screenshot capture mode when capture_screenshot is true.",
 				"enum":        []any{screenshotModeViewport, screenshotModeFullPage},
+			},
+			"actions": map[string]any{
+				"type":        "array",
+				"description": "Optional sequential CSS-selector actions to execute after navigation.",
+				"maxItems":    limits.MaxActions,
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"type": map[string]any{
+							"type":        "string",
+							"description": "Action type.",
+							"enum":        []any{browserActionWaitVisible, browserActionHover, browserActionClick, browserActionSetValue, browserActionType},
+							"maxLength":   limits.MaxActionTypeChars,
+						},
+						"selector": map[string]any{
+							"type":        "string",
+							"description": "CSS selector for the target element.",
+							"maxLength":   limits.MaxSelectorChars,
+						},
+						"value": map[string]any{
+							"type":        "string",
+							"description": "Value used by set_value and type actions.",
+							"maxLength":   limits.MaxActionValueChars,
+						},
+					},
+					"required":             []any{"type", "selector"},
+					"additionalProperties": false,
+				},
 			},
 		},
 		"required":             []any{"url"},
@@ -195,6 +224,7 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) mcpproto.Cal
 			MaxTextChars:      optionalInt(arguments, "max_text_chars"),
 			CaptureScreenshot: optionalBool(arguments, "capture_screenshot"),
 			ScreenshotMode:    optionalString(arguments, "screenshot_mode"),
+			Actions:           optionalActions(arguments, "actions"),
 		}
 		result, err := s.browser.Browse(ctx, request)
 		if err != nil {
@@ -272,6 +302,26 @@ func optionalString(arguments map[string]any, key string) string {
 		return ""
 	}
 	return value
+}
+
+func optionalActions(arguments map[string]any, key string) []BrowserAction {
+	raw, ok := arguments[key].([]any)
+	if !ok {
+		return nil
+	}
+	actions := make([]BrowserAction, 0, len(raw))
+	for _, item := range raw {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		actions = append(actions, BrowserAction{
+			Type:     optionalString(entry, "type"),
+			Selector: optionalString(entry, "selector"),
+			Value:    optionalString(entry, "value"),
+		})
+	}
+	return actions
 }
 
 func classifyError(err error) (string, string) {

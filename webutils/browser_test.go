@@ -645,6 +645,42 @@ func TestChromiumBrowserBrowseClickUpdatesRenderedDOM(t *testing.T) {
 	}
 }
 
+func TestChromiumBrowserBrowseHoverMovesMouseBeforeExtraction(t *testing.T) {
+	browser, server := newFixtureBrowser(t, DefaultLimits(), false, "allowed.example")
+
+	result, err := browser.Browse(context.Background(), BrowseRequest{
+		URL: fixtureURL(t, server, "allowed.example", "/actions/form"),
+		Actions: []BrowserAction{
+			{Type: browserActionHover, Selector: "#event-target"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Browse returned error: %v", err)
+	}
+	if !strings.Contains(result.VisibleText, "hovered") {
+		t.Fatalf("expected visible text to contain hover state, got %q", result.VisibleText)
+	}
+}
+
+func TestChromiumBrowserBrowseClickDispatchesMouseEvents(t *testing.T) {
+	browser, server := newFixtureBrowser(t, DefaultLimits(), false, "allowed.example")
+
+	result, err := browser.Browse(context.Background(), BrowseRequest{
+		URL: fixtureURL(t, server, "allowed.example", "/actions/form"),
+		Actions: []BrowserAction{
+			{Type: browserActionClick, Selector: "#event-target"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Browse returned error: %v", err)
+	}
+	for _, needle := range []string{"mousedown", "mouseup", "click"} {
+		if !strings.Contains(result.VisibleText, needle) {
+			t.Fatalf("expected visible text to contain %q, got %q", needle, result.VisibleText)
+		}
+	}
+}
+
 func TestChromiumBrowserBrowseWaitVisibleWaitsForAsyncElement(t *testing.T) {
 	browser, server := newFixtureBrowser(t, DefaultLimits(), false, "allowed.example")
 
@@ -907,7 +943,7 @@ func newBrowserFixtureServer(t *testing.T, includeBlockedScript bool) (*httptest
 			_, _ = w.Write([]byte(`<!doctype html><html><head><title>Fixture Next</title></head><body>next page</body></html>`))
 		case "/actions/form":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(`<!doctype html><html><head><title>Action Form</title></head><body><label for="target-input">Input</label><input id="target-input" value="seed value" onfocus="this.setSelectionRange(this.value.length, this.value.length)"><button id="show-value" type="button" onclick="document.getElementById('value-output').textContent = document.getElementById('target-input').value">Show value</button><button id="show-dom" type="button" onclick="document.getElementById('dom-output').textContent = 'clicked state'">Change DOM</button><a id="go-next" href="/next-action">Go next</a><div id="value-output">pending value</div><div id="dom-output">before click</div></body></html>`))
+			_, _ = w.Write([]byte(`<!doctype html><html><head><title>Action Form</title></head><body><label for="target-input">Input</label><input id="target-input" value="seed value" onfocus="this.setSelectionRange(this.value.length, this.value.length)"><button id="show-value" type="button" onclick="document.getElementById('value-output').textContent = document.getElementById('target-input').value">Show value</button><button id="show-dom" type="button" onclick="document.getElementById('dom-output').textContent = 'clicked state'">Change DOM</button><button id="event-target" type="button" onmouseenter="document.getElementById('pointer-output').textContent = 'hovered'" onmousemove="document.getElementById('pointer-output').textContent = 'hovered moving'" onmousedown="window.recordEvent('mousedown')" onmouseup="window.recordEvent('mouseup')" onclick="window.recordEvent('click')">Event target</button><a id="go-next" href="/next-action">Go next</a><div id="value-output">pending value</div><div id="dom-output">before click</div><div id="pointer-output">not hovered</div><div id="event-output">pending events</div><script>window.recordEvent = function (name) { var output = document.getElementById('event-output'); output.textContent = output.textContent === 'pending events' ? name : output.textContent + ' ' + name; };</script></body></html>`))
 		case "/actions/wait":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			_, _ = w.Write([]byte(`<!doctype html><html><head><title>Wait Fixture</title></head><body><div>waiting for async content</div><script>window.setTimeout(function () { var element = document.createElement('div'); element.id = 'late-element'; element.textContent = 'late element ready'; document.body.appendChild(element); }, 150);</script></body></html>`))
