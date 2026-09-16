@@ -184,7 +184,7 @@ func TestCallToolRejectsInvalidActionsArguments(t *testing.T) {
 		{
 			name:        "invalid actions argument",
 			raw:         json.RawMessage(`{"name":"browse_url","arguments":{"url":"https://example.com","actions":[{"type":"submit","selector":"#ok"}]}}`),
-			wantMessage: `arguments.actions[0].type must be one of "wait_visible", "hover", "click", "set_value", "type"`,
+			wantMessage: `actions[0].type is not one of the allowed values`,
 		},
 	}
 	for _, tc := range testCases {
