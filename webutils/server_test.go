@@ -51,8 +51,12 @@ func TestToolSchemaAndListWiring(t *testing.T) {
 	if _, ok := properties["capture_screenshot"]; !ok {
 		t.Fatalf("expected capture_screenshot property, got %+v", properties)
 	}
-	if _, ok := properties["actions"]; ok {
-		t.Fatalf("did not expect actions property, got %+v", properties["actions"])
+	actions, ok := properties["actions"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected actions property, got %+v", properties["actions"])
+	}
+	if actions["maxItems"] == nil {
+		t.Fatalf("expected actions maxItems bound, got %+v", actions)
 	}
 	mode, ok := properties["screenshot_mode"].(map[string]any)
 	if !ok {
@@ -91,7 +95,7 @@ func TestCallToolSuccess(t *testing.T) {
 		ScreenshotPNG:    []byte("png-bytes"),
 	}}
 	server := NewServer(DefaultLimits(), browser, log.New(io.Discard, "", 0))
-	raw := json.RawMessage(`{"name":"browse_url","arguments":{"url":"https://example.com","max_text_chars":123,"capture_screenshot":true,"screenshot_mode":"full_page"}}`)
+	raw := json.RawMessage(`{"name":"browse_url","arguments":{"url":"https://example.com","max_text_chars":123,"capture_screenshot":true,"screenshot_mode":"full_page","actions":[{"type":"hover","selector":"#cta"},{"type":"click","selector":"#cta"}]}}`)
 	result := server.callTool(context.Background(), raw)
 	if result.IsError {
 		t.Fatalf("callTool returned error result: %+v", result)
@@ -120,6 +124,9 @@ func TestCallToolSuccess(t *testing.T) {
 	}
 	if browser.last.ScreenshotMode != screenshotModeFullPage {
 		t.Fatalf("expected screenshot_mode to be forwarded, got %q", browser.last.ScreenshotMode)
+	}
+	if len(browser.last.Actions) != 2 || browser.last.Actions[0].Type != browserActionHover || browser.last.Actions[1].Selector != "#cta" {
+		t.Fatalf("expected actions to be forwarded, got %+v", browser.last.Actions)
 	}
 }
 
@@ -167,7 +174,7 @@ func TestCallToolRejectsUnknownArguments(t *testing.T) {
 	}
 }
 
-func TestCallToolRejectsLegacyActionsArguments(t *testing.T) {
+func TestCallToolRejectsInvalidActionsArguments(t *testing.T) {
 	server := NewServer(DefaultLimits(), &fakeBrowser{}, log.New(io.Discard, "", 0))
 	testCases := []struct {
 		name        string
@@ -175,9 +182,9 @@ func TestCallToolRejectsLegacyActionsArguments(t *testing.T) {
 		wantMessage string
 	}{
 		{
-			name:        "legacy actions argument",
+			name:        "invalid actions argument",
 			raw:         json.RawMessage(`{"name":"browse_url","arguments":{"url":"https://example.com","actions":[{"type":"submit","selector":"#ok"}]}}`),
-			wantMessage: `arguments has unknown property "actions"`,
+			wantMessage: `arguments.actions[0].type must be one of "wait_visible", "hover", "click", "set_value", "type"`,
 		},
 	}
 	for _, tc := range testCases {
