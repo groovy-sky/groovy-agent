@@ -1,5 +1,5 @@
 // Package llm implements the OpenAI compatible chat-completions client used to
-// talk to a local llama-server, including function/tool calls.
+// talk to a llama-server endpoint, including function/tool calls.
 package llm
 
 import (
@@ -75,7 +75,7 @@ type chatResponse struct {
 	} `json:"error"`
 }
 
-// Client talks to a local llama-server.
+// Client talks to a llama-server endpoint.
 type Client struct {
 	baseURL string
 	model   string

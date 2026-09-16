@@ -400,6 +400,16 @@ func TestConfigValidate(t *testing.T) {
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("expected a valid configuration: %v", err)
 	}
+	externalURL := base
+	externalURL.LlamaURL = "http://llama:8080"
+	if err := externalURL.Validate(); err != nil {
+		t.Fatalf("expected a Docker DNS llama URL to be accepted: %v", err)
+	}
+	httpsURL := base
+	httpsURL.LlamaURL = "https://llama.example"
+	if err := httpsURL.Validate(); err != nil {
+		t.Fatalf("expected an https llama URL to be accepted: %v", err)
+	}
 
 	missingURL := base
 	missingURL.LlamaURL = "127.0.0.1:8080"

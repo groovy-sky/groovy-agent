@@ -1,5 +1,5 @@
-// Command agent is the CLI entry point: it connects a local llama-server to
-// the coreutils MCP server and answers a single request.
+// Command agent is the CLI entry point: it connects an OpenAI-compatible
+// llama-server to the coreutils MCP server and answers a single request.
 //
 // Diagnostics are written to stderr; only the final answer reaches stdout.
 package main
@@ -19,7 +19,7 @@ import (
 func main() {
 	config := agent.Config{}
 	flags := flag.NewFlagSet("agent", flag.ExitOnError)
-	flags.StringVar(&config.LlamaURL, "llama-url", "http://127.0.0.1:8080", "base URL of the local llama-server")
+	flags.StringVar(&config.LlamaURL, "llama-url", "http://127.0.0.1:8080", "base URL of the OpenAI-compatible llama-server")
 	flags.StringVar(&config.Model, "model", "local-phi-4-mini-instruct", "model name advertised by llama-server")
 	flags.StringVar(&config.MCPCommand, "mcp-command", "./bin/coreutils-mcp", "path to the coreutils MCP server executable")
 	flags.StringVar(&config.WebMCPCommand, "web-mcp-command", "", "optional path to the webutils MCP server executable")
