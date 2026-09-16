@@ -142,7 +142,7 @@ func inputSchema(limits Limits) map[string]any {
 			"actions": map[string]any{
 				"type":        "array",
 				"description": "Optional sequential CSS-selector actions to execute after navigation.",
-				"maxItems":     limits.MaxActions,
+				"maxItems":    limits.MaxActions,
 				"items": map[string]any{
 					"type": "object",
 					"properties": map[string]any{

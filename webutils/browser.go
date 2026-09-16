@@ -975,6 +975,16 @@ func humanTypeDelay(index int) time.Duration {
 	return time.Duration(22+(index%5)*9) * time.Millisecond
 }
 
+func clampInt(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
 func clampFloat(value, min, max float64) float64 {
 	if value < min {
 		return min
