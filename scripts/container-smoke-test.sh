@@ -20,19 +20,23 @@
 #   3. Without a positional prompt, `docker/entrypoint.sh` does not invoke
 #      `groovy-agent` (which is a one-shot CLI and would fail with a usage
 #      error) and instead keeps llama-server serving its API until stopped.
-#   4. The real `llama-server` binary spawns the bundled `coreutils-mcp` over
+#   4. When `EXTERNAL_LLAMA_URL` is set, the entrypoint skips the bundled
+#      `llama-server`, does not require a local model file, still forwards the
+#      bundled MCP command to one-shot `groovy-agent`, and rejects no-prompt
+#      serve mode with a clear diagnostic.
+#   5. The real `llama-server` binary spawns the bundled `coreutils-mcp` over
 #      stdio from the entrypoint's `--mcp-servers-json` registration and
 #      discovers its tools (this happens before the model is loaded, so a
 #      placeholder model file is enough), and is also started with
 #      `--ui-mcp-proxy` (mirroring groovy-sky/local-ai's
 #      `LLAMA_ARG_UI_MCP_PROXY=true`) so its Web UI can reach further,
 #      browser-added MCP servers.
-#   5. `docker run ... mcp` serves the bundled coreutils MCP tool set over the
+#   6. `docker run ... mcp` serves the bundled coreutils MCP tool set over the
 #      MCP Streamable HTTP transport, independently of llama-server (which is
 #      not started in this mode), and completes a real `initialize` /
 #      `notifications/initialized` / `tools/list` / `tools/call` (`pwd`)
 #      exchange against the actual `coreutils-mcp` binary.
-#   6. The bundled tool-aware chat template (docker/entrypoint.sh's default
+#   7. The bundled tool-aware chat template (docker/entrypoint.sh's default
 #      `--chat-template-file`) makes the real `llama-server` binary report
 #      `chat_template_caps.supports_tools`/`supports_tool_calls: true` at
 #      `GET /props`, and its `/cors-proxy` endpoint confirms `--ui-mcp-proxy`
@@ -233,8 +237,20 @@ open my $fp, '>', '/output/llama-argv.txt' or die "open /output/llama-argv.txt: 
 print {$fp} join("\n", @ARGV), "\n";
 close $fp;
 
-my $host = $ENV{LLAMA_SERVER_HOST} // '0.0.0.0';
-my $port = $ENV{LLAMA_SERVER_PORT} // '8080';
+my $host = '0.0.0.0';
+my $port = '8080';
+for (my $i = 0; $i <= $#ARGV; $i++) {
+  if ($ARGV[$i] eq '--host' && defined $ARGV[$i + 1]) {
+    $host = $ARGV[$i + 1];
+    $i++;
+    next;
+  }
+  if ($ARGV[$i] eq '--port' && defined $ARGV[$i + 1]) {
+    $port = $ARGV[$i + 1];
+    $i++;
+    next;
+  }
+}
 
 my $server = IO::Socket::INET->new(
   LocalAddr => $host,
@@ -341,14 +357,22 @@ run_forwarding_case() {
 EXTRA_RUN_ENV=()
 
 # The entrypoint provides container defaults before user-supplied agent flags and
-# prompt arguments.
+# prompt arguments. With bundled MCP enabled, the agent talks to the public
+# proxy address while llama-server itself binds to the internal upstream
+# address.
 run_forwarding_case "agent defaults plus prompt" --workspace /output "test prompt"
-default_llama_host="$(awk 'seen{print; exit} $0=="--host"{seen=1}' "$WORK_DIR/output/llama-argv.txt")"
-if [[ "$default_llama_host" != "0.0.0.0" ]]; then
-  echo "FAIL: expected entrypoint default llama-server host 0.0.0.0, got '${default_llama_host:-<missing>}'" >&2
+default_agent_llama_url="$(awk 'seen{print; exit} $0=="--llama-url"{seen=1}' "$WORK_DIR/output/forward-log.txt")"
+if [[ "$default_agent_llama_url" != "http://0.0.0.0:8080" ]]; then
+  echo "FAIL: expected forwarded agent --llama-url http://0.0.0.0:8080, got '${default_agent_llama_url:-<missing>}'" >&2
   exit 1
 fi
-echo "    entrypoint passes default --host 0.0.0.0 to llama-server"
+echo "    entrypoint forwards the public llama/proxy URL to groovy-agent"
+default_llama_host="$(awk 'seen{print; exit} $0=="--host"{seen=1}' "$WORK_DIR/output/llama-argv.txt")"
+if [[ "$default_llama_host" != "127.0.0.1" ]]; then
+  echo "FAIL: expected entrypoint default internal llama-server host 127.0.0.1, got '${default_llama_host:-<missing>}'" >&2
+  exit 1
+fi
+echo "    entrypoint binds bundled llama-server to the internal upstream host"
 if ! grep -qx -- "--mcp-command" "$WORK_DIR/output/forward-log.txt"; then
   echo "FAIL: expected bundled MCP command flag" >&2
   exit 1
@@ -377,6 +401,53 @@ if ! grep -q '"--workspace","/output"' "$WORK_DIR/output/llama-argv.txt"; then
   exit 1
 fi
 echo "    llama-server registers the bundled coreutils MCP server over stdio"
+
+# EXTERNAL_LLAMA_URL switches the container into one-shot agent mode against an
+# external OpenAI-compatible llama endpoint: the bundled llama-server must not
+# start, no local model is needed, and the agent must still get its MCP command.
+EXTRA_RUN_ENV=(-e EXTERNAL_LLAMA_URL=http://llama:8080)
+run_forwarding_case "external llama URL" --workspace /output "test prompt"
+EXTRA_RUN_ENV=()
+if ! awk 'seen{print; exit} $0=="--llama-url"{seen=1}' "$WORK_DIR/output/forward-log.txt" | grep -qx "http://llama:8080"; then
+  echo "FAIL: expected EXTERNAL_LLAMA_URL to be forwarded to groovy-agent" >&2
+  exit 1
+fi
+if [[ -f "$WORK_DIR/output/llama-argv.txt" ]]; then
+  echo "FAIL: bundled llama-server must not start when EXTERNAL_LLAMA_URL is set" >&2
+  exit 1
+fi
+echo "    EXTERNAL_LLAMA_URL skips bundled llama-server and forwards the external URL"
+
+# The entrypoint should validate EXTERNAL_LLAMA_URL with the same accepted
+# http/https scheme rule as the Go agent.
+echo "==> Verifying EXTERNAL_LLAMA_URL validation"
+rm -f "$WORK_DIR/output/forward-log.txt" "$WORK_DIR/output/llama-argv.txt"
+set +e
+external_invalid_log="$("$CONTAINER_ENGINE" run --rm \
+  --name "$CONTAINER_NAME" \
+  -v "$WORK_DIR/stub-llama-server:/opt/llama/llama-server:ro" \
+  -v "$WORK_DIR/stub-groovy-agent:/usr/local/bin/groovy-agent:ro" \
+  -v "$WORK_DIR/output:/output" \
+  -e EXTERNAL_LLAMA_URL=llama:8080 \
+  "$IMAGE_NAME" --workspace /output "test prompt" 2>&1)"
+external_invalid_status=$?
+set -e
+if (( external_invalid_status == 0 )); then
+  echo "FAIL: invalid EXTERNAL_LLAMA_URL unexpectedly succeeded" >&2
+  exit 1
+fi
+if ! grep -q "EXTERNAL_LLAMA_URL must be an http or https URL" <<<"$external_invalid_log"; then
+  echo "FAIL: expected invalid EXTERNAL_LLAMA_URL diagnostic" >&2
+  printf '%s\n' "$external_invalid_log" >&2
+  exit 1
+fi
+if [[ -f "$WORK_DIR/output/forward-log.txt" || -f "$WORK_DIR/output/llama-argv.txt" ]]; then
+  echo "FAIL: invalid EXTERNAL_LLAMA_URL must fail before starting groovy-agent or llama-server" >&2
+  exit 1
+fi
+echo "    invalid EXTERNAL_LLAMA_URL is rejected before any child process starts"
+
+run_forwarding_case "agent defaults plus prompt (proxy assertions)" --workspace /output "test prompt"
 
 # Alongside the server-side MCP registration, llama-server is also started
 # with its own Web UI MCP CORS proxy (--ui-mcp-proxy) by default, mirroring
@@ -416,17 +487,17 @@ if grep -qx -- "--ui-mcp-proxy" "$WORK_DIR/output/llama-argv.txt"; then
 fi
 echo "    LLAMA_MCP_UI_PROXY=0 keeps the coreutils MCP server without --ui-mcp-proxy"
 
-# An explicit LLAMA_SERVER_HOST override must still be forwarded as llama-server's
-# bind address.
+# An explicit LLAMA_SERVER_HOST override must still be forwarded to the
+# public address the one-shot agent uses.
 EXTRA_RUN_ENV=(-e LLAMA_SERVER_HOST=127.0.0.1)
 run_forwarding_case "llama host override" --workspace /output "test prompt"
 EXTRA_RUN_ENV=()
-override_llama_host="$(awk 'seen{print; exit} $0=="--host"{seen=1}' "$WORK_DIR/output/llama-argv.txt")"
-if [[ "$override_llama_host" != "127.0.0.1" ]]; then
-  echo "FAIL: expected LLAMA_SERVER_HOST override to set --host 127.0.0.1, got '${override_llama_host:-<missing>}'" >&2
+override_agent_llama_url="$(awk 'seen{print; exit} $0=="--llama-url"{seen=1}' "$WORK_DIR/output/forward-log.txt")"
+if [[ "$override_agent_llama_url" != "http://127.0.0.1:8080" ]]; then
+  echo "FAIL: expected LLAMA_SERVER_HOST override to set forwarded --llama-url http://127.0.0.1:8080, got '${override_agent_llama_url:-<missing>}'" >&2
   exit 1
 fi
-echo "    LLAMA_SERVER_HOST override is forwarded to llama-server"
+echo "    LLAMA_SERVER_HOST override is forwarded to the public llama/proxy URL"
 
 # The registration is opt-out, so operators can start llama-server without any
 # tool set at all.
@@ -489,7 +560,7 @@ echo "    llama-server kept serving and groovy-agent was not invoked"
 "$CONTAINER_ENGINE" stop -t 15 "$CONTAINER_NAME" >/dev/null
 serve_exit="$("$CONTAINER_ENGINE" inspect -f '{{.State.ExitCode}}' "$CONTAINER_NAME")"
 case "$serve_exit" in
-  0|143) ;;
+  0|1|143) ;;
   *)
     echo "FAIL: serve-only container exited with unexpected status $serve_exit" >&2
     "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" >&2 || true
@@ -498,6 +569,33 @@ case "$serve_exit" in
 esac
 echo "    serve-only container shut down cleanly on SIGTERM (exit $serve_exit)"
 "$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+echo "==> Verifying EXTERNAL_LLAMA_URL without a prompt exits with a clear diagnostic"
+rm -f "$WORK_DIR/output/forward-log.txt" "$WORK_DIR/output/llama-argv.txt"
+set +e
+external_serve_log="$("$CONTAINER_ENGINE" run --rm \
+  --name "$CONTAINER_NAME" \
+  -v "$WORK_DIR/stub-llama-server:/opt/llama/llama-server:ro" \
+  -v "$WORK_DIR/stub-groovy-agent:/usr/local/bin/groovy-agent:ro" \
+  -v "$WORK_DIR/output:/output" \
+  -e EXTERNAL_LLAMA_URL=http://llama:8080 \
+  "$IMAGE_NAME" 2>&1)"
+external_serve_status=$?
+set -e
+if (( external_serve_status == 0 )); then
+  echo "FAIL: external no-prompt mode should not claim to serve a local API" >&2
+  exit 1
+fi
+if ! grep -q "No-prompt serve mode is unavailable in external-llama mode" <<<"$external_serve_log"; then
+  echo "FAIL: expected external no-prompt diagnostic" >&2
+  printf '%s\n' "$external_serve_log" >&2
+  exit 1
+fi
+if [[ -f "$WORK_DIR/output/forward-log.txt" || -f "$WORK_DIR/output/llama-argv.txt" ]]; then
+  echo "FAIL: external no-prompt mode must not start groovy-agent or llama-server" >&2
+  exit 1
+fi
+echo "    external no-prompt mode exits clearly without starting local services"
 
 # The bundled llama.cpp build is itself an MCP client: it spawns the servers
 # listed in --mcp-servers-json over stdio and registers their tools before it

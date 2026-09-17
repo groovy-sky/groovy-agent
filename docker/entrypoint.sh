@@ -64,6 +64,22 @@ wait_for_exit_status() {
   set -e
 }
 
+validate_http_url() {
+  local label="$1"
+  local value="$2"
+  if [[ -z "${value//[[:space:]]/}" ]]; then
+    echo "${label} must be an http or https URL" >&2
+    exit 1
+  fi
+  case "$value" in
+    http://*|https://*) ;;
+    *)
+      echo "${label} must be an http or https URL" >&2
+      exit 1
+      ;;
+  esac
+}
+
 # `mcp` is an explicit subcommand (the container's first positional argument),
 # distinct from both the default no-prompt llama-server API mode and the
 # prompted one-shot `groovy-agent` mode. It serves the bundled read-only
@@ -123,6 +139,11 @@ LLAMA_CTX_SIZE="${LLAMA_CTX_SIZE:-8192}"
 LLAMA_THREADS="${LLAMA_THREADS:-0}"
 LLAMA_N_GPU_LAYERS="${LLAMA_N_GPU_LAYERS:-0}"
 LLAMA_STARTUP_TIMEOUT="${LLAMA_STARTUP_TIMEOUT:-180}"
+external_llama_url_is_set=0
+if [[ ${EXTERNAL_LLAMA_URL+x} ]]; then
+  external_llama_url_is_set=1
+fi
+EXTERNAL_LLAMA_URL="${EXTERNAL_LLAMA_URL:-}"
 
 # The bundled Phi-4-mini GGUF's own embedded chat template (and llama.cpp's
 # "chatml" --chat-template fallback) only understand plain
@@ -293,6 +314,30 @@ if has_positional_prompt "$@"; then
   agent_mode="oneshot"
 else
   agent_mode="serve"
+fi
+
+if [[ "$external_llama_url_is_set" == "1" ]]; then
+  validate_http_url "EXTERNAL_LLAMA_URL" "$EXTERNAL_LLAMA_URL"
+
+  if [[ "$agent_mode" == "serve" ]]; then
+    echo "EXTERNAL_LLAMA_URL is set, so the container will not start the bundled llama-server." >&2
+    echo "No-prompt serve mode is unavailable in external-llama mode because the external service already serves the API." >&2
+    echo "Provide a prompt for one-shot agent mode, unset EXTERNAL_LLAMA_URL to serve the bundled llama-server at http://127.0.0.1:8080, or run 'mcp' for standalone MCP mode." >&2
+    exit 1
+  fi
+
+  agent_args=(
+    --llama-url "$EXTERNAL_LLAMA_URL"
+    --model "$LLAMA_MODEL_NAME"
+    --mcp-command /usr/local/bin/coreutils-mcp
+    --max-tool-calls-per-turn "$AGENT_MAX_TOOL_CALLS_PER_TURN"
+  )
+  if [[ -n "$AGENT_WEB_MCP_COMMAND" ]]; then
+    agent_args+=(--web-mcp-command "$AGENT_WEB_MCP_COMMAND")
+  fi
+  agent_args+=("$@")
+
+  exec /usr/local/bin/groovy-agent "${agent_args[@]}" <&3
 fi
 
 if [[ ! -f "$LLAMA_MODEL_PATH" ]]; then

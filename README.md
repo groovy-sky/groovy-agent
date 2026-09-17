@@ -262,9 +262,11 @@ files are ignored by git (see `.gitignore`).
 The `Dockerfile` builds the Go binaries (`groovy-agent`, `coreutils-mcp`,
 `webutils-mcp`), layers them on top of the
 official `llama.cpp` server image, and wires everything together with
-`docker/entrypoint.sh`, which starts `llama-server`, waits for it to
+`docker/entrypoint.sh`, which by default starts `llama-server`, waits for it to
 become healthy, then runs `groovy-agent` with the bundled MCP server
-configured. The runtime image also bundles Debian's Chromium payload and its
+configured. If `EXTERNAL_LLAMA_URL` is set, the entrypoint instead skips the
+bundled `llama-server` and runs the one-shot agent against that external
+OpenAI-compatible endpoint. The runtime image also bundles Debian's Chromium payload and its
 runtime dependency closure, adds a stable `/usr/bin/chromium` wrapper for
 `webutils-mcp`, installs the CA certificates/fonts the browser needs, and
 defaults to running as uid/gid `10001:10001` (`groovy-agent`) with owned
@@ -293,14 +295,21 @@ depending on the command it is given:
   stdout, and the container exits with the agent's exit status;
 - **without a prompt** (`docker run ... groovy-agent:local`): there is
   nothing for the one-shot agent to do, so the entrypoint skips it and
-  keeps `llama-server` running as an OpenAI-compatible API server until
-  the container is stopped;
+  keeps the bundled `llama-server` running as an OpenAI-compatible API
+  server until the container is stopped;
 - **with `mcp` as the first argument** (`docker run ... groovy-agent:local
   mcp`): the entrypoint does not start `llama-server` or the agent at
   all; it runs `coreutils-mcp --transport http`, serving the bundled
   read-only coreutils tool set over the MCP Streamable HTTP transport for
   any remote MCP-compatible client (see [Run the remote MCP server](#run-the-remote-mcp-server-no-llama-server)
   below).
+
+When `EXTERNAL_LLAMA_URL` is set, only the **with a prompt** one-shot mode is
+available. In that mode the container does **not** start the bundled
+`/opt/llama/llama-server`, does **not** require `LLAMA_MODEL_PATH`, and instead
+points `groovy-agent --llama-url` at the external base URL. No-prompt serve mode
+is rejected with a clear diagnostic because the external service is already the
+API server.
 
 ### Build with the model baked into the image
 
@@ -356,6 +365,42 @@ front of `llama-server` so `POST /v1/chat/completions` automatically includes
 MCP-discovered tools even when the client omits a manual `tools` array. If the
 bridge cannot fetch/translate tools at runtime, the response includes a
 diagnostic assistant message instead of a generic “cannot browse” claim.
+
+### Use an external llama-server instead of the bundled one
+
+Set `EXTERNAL_LLAMA_URL` to the base URL of a reachable external
+OpenAI-compatible `llama-server`, for example a Docker Compose service name such
+as `http://llama:8080`. In this mode the container skips the bundled
+`/opt/llama/llama-server`, does not require `LLAMA_MODEL_PATH` or local model
+files, and still runs one-shot `groovy-agent` with its configured MCP command.
+
+```yaml
+services:
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    expose:
+      - "8080"
+
+  agent:
+    image: ghcr.io/groovy-sky/groovy-agent:phi4-mini
+    depends_on:
+      - llama
+    environment:
+      EXTERNAL_LLAMA_URL: http://llama:8080
+    volumes:
+      - ./output:/output
+    command:
+      - --workspace
+      - /output
+      - "summarize the files in /output"
+```
+
+`EXTERNAL_LLAMA_URL` must start with `http://` or `https://`, just like the Go
+agent's `--llama-url` flag. The external service must be reachable **from inside
+the container**; `http://127.0.0.1:8080` remains the default only when
+`EXTERNAL_LLAMA_URL` is unset and the image starts its own bundled
+`llama-server`. If you omit the prompt while `EXTERNAL_LLAMA_URL` is set, the
+container exits with a diagnostic instead of pretending to serve a local API.
 
 ### Bundled MCP tools inside llama.cpp
 
@@ -599,8 +644,8 @@ never published outside the container either. Set
 
 Agent CLI flags (`cmd/agent`):
 
-- `--llama-url` (default `http://127.0.0.1:8080`): base URL of the local
-  `llama-server`; must be `http://` or `https://`.
+- `--llama-url` (default `http://127.0.0.1:8080`): base URL of the
+  OpenAI-compatible `llama-server`; must be `http://` or `https://`.
 - `--model` (default `local-phi-4-mini-instruct`): model name advertised
   to `llama-server`.
 - `--mcp-command` (default `./bin/coreutils-mcp`): path to the coreutils
@@ -677,6 +722,12 @@ Container/`docker/entrypoint.sh` environment variables:
 
 - `LLAMA_SERVER_HOST` (default `0.0.0.0`)
 - `LLAMA_SERVER_PORT` (default `8080`)
+- `EXTERNAL_LLAMA_URL` (default unset): when set, run one-shot
+  `groovy-agent` against this external OpenAI-compatible `llama-server` base
+  URL instead of starting `/opt/llama/llama-server`. Must start with
+  `http://` or `https://`. In this mode the container does not require
+  `LLAMA_MODEL_PATH`, does not start the bundled OpenAI MCP proxy, and rejects
+  no-prompt serve mode because the external service is already the API server.
 - `LLAMA_MODEL_PATH` or `LLAMA_MODEL_FILE` (default filename
   `Phi-4-mini-instruct.Q8_0.gguf`, looked up under `/models`)
 - `LLAMA_MODEL_NAME` (model alias passed to `llama-server --alias` and to
