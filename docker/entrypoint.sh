@@ -187,7 +187,7 @@ if [[ ${LLAMA_CHAT_TEMPLATE_FILE+x} ]]; then
   llama_chat_template_file_was_set="1"
 fi
 llama_bundled_chat_template_file="/opt/llama/chat-templates/tool-use-chatml.jinja"
-if [[ "$LLAMA_MODEL_FILE" == "gemma-4-E2B-it-Q4_K_M.gguf" ]]; then
+if [[ "${LLAMA_MODEL_FILE,,}" == *gemma* || "${LLAMA_MODEL_NAME,,}" == *gemma* ]]; then
   llama_bundled_chat_template_file="/opt/llama/chat-templates/tool-use-gemma.jinja"
 fi
 LLAMA_CHAT_TEMPLATE="${LLAMA_CHAT_TEMPLATE-}"
