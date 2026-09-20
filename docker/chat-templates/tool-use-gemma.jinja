@@ -35,6 +35,25 @@ Available tools:
 {%- endfor %}
 </tools>
 {%- endmacro -%}
+{%- macro render_content(content) -%}
+{%- if content is string -%}
+{{- content -}}
+{%- elif content is sequence and content is not mapping -%}
+{%- for part in content -%}
+{%- if part is string -%}
+{{- part -}}
+{%- elif part is mapping and part.type in ['text', 'input_text', 'output_text'] and part.text is defined -%}
+{{- part.text -}}
+{%- elif part is mapping and part.type == 'refusal' and part.refusal is defined -%}
+{{- part.refusal -}}
+{%- else -%}
+{{- part | tojson -}}
+{%- endif -%}
+{%- endfor -%}
+{%- elif content is not none -%}
+{{- content | tojson -}}
+{%- endif -%}
+{%- endmacro -%}
 {%- macro render_first_user_prefix(system_prompt, tools) -%}
 {%- if system_prompt %}
 {{- system_prompt }}
@@ -50,10 +69,11 @@ Available tools:
 {%- set ns = namespace(system_prompt='', first_user_emitted=false, has_user=false) -%}
 {%- for message in messages %}
     {%- if message.role == 'system' and message.content %}
+        {%- set system_content = render_content(message.content) %}
         {%- if ns.system_prompt %}
-            {%- set ns.system_prompt = ns.system_prompt + '\n\n' + message.content %}
+            {%- set ns.system_prompt = ns.system_prompt + '\n\n' + system_content %}
         {%- else %}
-            {%- set ns.system_prompt = message.content %}
+            {%- set ns.system_prompt = system_content %}
         {%- endif %}
     {%- elif message.role == 'user' %}
         {%- set ns.has_user = true %}
@@ -76,12 +96,12 @@ Available tools:
             {%- endif %}
             {%- set ns.first_user_emitted = true %}
         {%- endif %}
-        {{- message.content }}
+        {{- render_content(message.content) }}
         {{- '<end_of_turn>\n' }}
     {%- elif message.role == 'assistant' %}
         {{- '<start_of_turn>model\n' }}
         {%- if message.content %}
-            {{- message.content }}
+            {{- render_content(message.content) }}
         {%- endif %}
         {%- for tool_call in message.tool_calls | default([]) %}
             {%- if tool_call.function is defined %}
@@ -97,7 +117,7 @@ Available tools:
         {%- endfor %}
         {{- '<end_of_turn>\n' }}
     {%- elif message.role == 'tool' %}
-        {{- '<start_of_turn>user\n<tool_response>\n' + message.content + '\n</tool_response><end_of_turn>\n' }}
+        {{- '<start_of_turn>user\n<tool_response>\n' + render_content(message.content) + '\n</tool_response><end_of_turn>\n' }}
     {%- endif %}
 {%- endfor %}
 {%- if add_generation_prompt %}

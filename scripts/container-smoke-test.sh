@@ -833,9 +833,17 @@ gemma_apply_template_request="$(cat <<'EOF'
 {
   "messages": [
     {"role": "system", "content": "System says: use the provided tools when the user asks for fresh web information."},
-    {"role": "user", "content": "Search the web for the latest groovy-agent release notes."},
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Search the web for the latest groovy-agent release notes."}
+      ]
+    },
     {
       "role": "assistant",
+      "content": [
+        {"type": "text", "text": "I will look that up."}
+      ],
       "tool_calls": [
         {
           "id": "call_1",
