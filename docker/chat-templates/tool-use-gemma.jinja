@@ -108,7 +108,13 @@ Available tools:
                 {%- set tool_call = tool_call.function %}
             {%- endif %}
             {{- '\n<tool_call>\n' }}
-            {{- {"name": tool_call.name, "arguments": tool_call.arguments} | tojson }}
+            {{- '{"name": ' + (tool_call.name | tojson) + ', "arguments": ' }}
+            {%- if tool_call.arguments is string %}
+                {{- tool_call.arguments }}
+            {%- else %}
+                {{- tool_call.arguments | tojson }}
+            {%- endif %}
+            {{- '}' }}
             {{- '\n</tool_call>' }}
         {%- endfor %}
         {{- '<end_of_turn>\n' }}
