@@ -860,6 +860,7 @@ gemma_apply_template_request="$(cat <<'EOF'
     },
     {
       "role": "tool",
+      "tool_call_id": "call_1",
       "content": "{\"results\":[{\"title\":\"Release notes\",\"url\":\"https://example.invalid/release-notes\"}]}"
     }
   ],
@@ -924,6 +925,7 @@ checks = [
     ("webutils_browse_url", "missing rendered browse tool schema"),
     ("<tool_call>", "missing rendered tool call block"),
     ("<tool_response>", "missing rendered tool response block"),
+    ("\"tool_call_id\": \"call_1\"", "missing rendered tool_call_id"),
     ("<start_of_turn>model\n", "missing Gemma model generation prompt")
 ]
 for needle, error in checks:

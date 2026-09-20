@@ -117,7 +117,13 @@ Available tools:
         {%- endfor %}
         {{- '<end_of_turn>\n' }}
     {%- elif message.role == 'tool' %}
-        {{- '<start_of_turn>user\n<tool_response>\n' + render_content(message.content) + '\n</tool_response>\n<end_of_turn>\n' }}
+        {{- '<start_of_turn>user\n<tool_response>\n' }}
+        {%- if message.tool_call_id is defined and message.tool_call_id %}
+            {{- {"tool_call_id": message.tool_call_id, "content": message.content} | tojson }}
+        {%- else %}
+            {{- render_content(message.content) }}
+        {%- endif %}
+        {{- '\n</tool_response>\n<end_of_turn>\n' }}
     {%- endif %}
 {%- endfor %}
 {%- if add_generation_prompt %}
