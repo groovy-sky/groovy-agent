@@ -186,8 +186,9 @@ llama_chat_template_file_was_set=""
 if [[ ${LLAMA_CHAT_TEMPLATE_FILE+x} ]]; then
   llama_chat_template_file_was_set="1"
 fi
-case "${LLAMA_MODEL_FILE,,}:${LLAMA_MODEL_NAME,,}" in
-  *gemma*:*|*:*gemma*)
+llama_model_file_basename="${LLAMA_MODEL_FILE##*/}"
+case "${llama_model_file_basename,,}:${LLAMA_MODEL_NAME,,}" in
+  gemma*:*|*:gemma*)
     llama_bundled_chat_template_file="/opt/llama/chat-templates/tool-use-gemma.jinja"
     ;;
   *)
