@@ -110,7 +110,12 @@ Available tools:
             {{- '\n<tool_call>\n' }}
             {{- '{"name": ' + (tool_call.name | tojson) + ', "arguments": ' }}
             {%- if tool_call.arguments is string %}
-                {{- tool_call.arguments }}
+                {%- set trimmed_arguments = tool_call.arguments | trim %}
+                {%- if trimmed_arguments | length >= 2 and trimmed_arguments[0] == '{' and trimmed_arguments[-1] == '}' %}
+                    {{- trimmed_arguments }}
+                {%- else %}
+                    {{- tool_call.arguments | tojson }}
+                {%- endif %}
             {%- else %}
                 {{- tool_call.arguments | tojson }}
             {%- endif %}
