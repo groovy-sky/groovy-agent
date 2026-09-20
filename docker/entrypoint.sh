@@ -186,15 +186,9 @@ llama_chat_template_file_was_set=""
 if [[ ${LLAMA_CHAT_TEMPLATE_FILE+x} ]]; then
   llama_chat_template_file_was_set="1"
 fi
-llama_model_file_basename="${LLAMA_MODEL_FILE##*/}"
-llama_model_selector="${llama_model_file_basename,,}:${LLAMA_MODEL_NAME,,}"
-if [[ "$llama_model_selector" =~ (^|[:/_-])gemma([0-9._:-]|$) ]]; then
-    llama_bundled_chat_template_file="/opt/llama/chat-templates/tool-use-gemma.jinja"
-else
-    llama_bundled_chat_template_file="/opt/llama/chat-templates/tool-use-chatml.jinja"
-fi
+LLAMA_BUNDLED_CHAT_TEMPLATE_FILE="${LLAMA_BUNDLED_CHAT_TEMPLATE_FILE:-/opt/llama/chat-templates/tool-use-chatml.jinja}"
 LLAMA_CHAT_TEMPLATE="${LLAMA_CHAT_TEMPLATE-}"
-LLAMA_CHAT_TEMPLATE_FILE="${LLAMA_CHAT_TEMPLATE_FILE-$llama_bundled_chat_template_file}"
+LLAMA_CHAT_TEMPLATE_FILE="${LLAMA_CHAT_TEMPLATE_FILE-$LLAMA_BUNDLED_CHAT_TEMPLATE_FILE}"
 LLAMA_EXTRA_ARGS="${LLAMA_EXTRA_ARGS:-}"
 
 # Sampling/generation guardrails. These defaults exist to prevent small
