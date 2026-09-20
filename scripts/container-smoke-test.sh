@@ -936,14 +936,17 @@ for bad in ("<|im_start|>", "<|im_end|>"):
     if bad in prompt:
         print(f"unexpected ChatML marker in Gemma prompt: {bad}", file=sys.stderr)
         sys.exit(1)
-match = re.search(r"I will look that up\.\n<tool_call>\n(.*?)\n</tool_call>", prompt, re.S)
-if not match:
+tool_call = None
+for block in re.findall(r"<tool_call>\n(.*?)\n</tool_call>", prompt, re.S):
+    try:
+        candidate = json.loads(block)
+    except Exception:
+        continue
+    if candidate.get("name") == "webutils_search_web":
+        tool_call = candidate
+        break
+if tool_call is None:
     print("missing parseable Gemma tool_call block", file=sys.stderr)
-    sys.exit(1)
-try:
-    tool_call = json.loads(match.group(1))
-except Exception as exc:
-    print(f"rendered Gemma tool_call block was not valid JSON: {exc}", file=sys.stderr)
     sys.exit(1)
 if tool_call.get("arguments") != {"query": "groovy-agent latest release notes"}:
     print("string tool arguments were not rendered as a raw JSON object", file=sys.stderr)
