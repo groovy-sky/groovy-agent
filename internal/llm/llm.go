@@ -35,6 +35,26 @@ type FunctionCall struct {
 	Arguments string `json:"arguments"`
 }
 
+// MarshalJSON preserves valid JSON argument strings as structured JSON values
+// while falling back to a regular JSON string for non-JSON input.
+func (f FunctionCall) MarshalJSON() ([]byte, error) {
+	type wireFunctionCall struct {
+		Name      string `json:"name"`
+		Arguments any    `json:"arguments"`
+	}
+	arguments := any(f.Arguments)
+	if trimmed := strings.TrimSpace(f.Arguments); trimmed != "" && json.Valid([]byte(trimmed)) {
+		var decoded any
+		if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil {
+			arguments = decoded
+		}
+	}
+	return json.Marshal(wireFunctionCall{
+		Name:      f.Name,
+		Arguments: arguments,
+	})
+}
+
 // ToolCall is a single tool call emitted by the model.
 type ToolCall struct {
 	ID       string       `json:"id"`

@@ -912,6 +912,7 @@ if [[ -z "$gemma_rendered_prompt" ]]; then
 fi
 if ! gemma_prompt_summary="$(python3 -c '
 import json, sys
+import re
 try:
     doc = json.load(sys.stdin)
     prompt = doc["prompt"]
@@ -937,6 +938,18 @@ for bad in ("<|im_start|>", "<|im_end|>"):
     if bad in prompt:
         print(f"unexpected ChatML marker in Gemma prompt: {bad}", file=sys.stderr)
         sys.exit(1)
+match = re.search(r"I will look that up\.\n<tool_call>\n(.*?)\n</tool_call>", prompt, re.S)
+if not match:
+    print("missing parseable Gemma tool_call block", file=sys.stderr)
+    sys.exit(1)
+try:
+    tool_call = json.loads(match.group(1))
+except Exception as exc:
+    print(f"rendered Gemma tool_call block was not valid JSON: {exc}", file=sys.stderr)
+    sys.exit(1)
+if tool_call.get("arguments") != {"query": "groovy-agent latest release notes"}:
+    print("string tool arguments were not rendered as a raw JSON object", file=sys.stderr)
+    sys.exit(1)
 if prompt.index("System says:") > prompt.index("Search the web for the latest groovy-agent release notes."):
     print("system prompt was not folded ahead of the first user message", file=sys.stderr)
     sys.exit(1)
