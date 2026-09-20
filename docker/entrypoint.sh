@@ -154,13 +154,14 @@ EXTERNAL_LLAMA_URL="${EXTERNAL_LLAMA_URL:-}"
 # free-generates pseudo-shell text like `coreutil_pwd --show-path` instead of
 # actually invoking the registered MCP tools from the Web UI.
 #
-# LLAMA_CHAT_TEMPLATE_FILE therefore defaults to a bundled ChatML-derived
-# template (docker/chat-templates/tool-use-chatml.jinja) that does render
-# tools/tool_calls/tool-role messages, which is enough for llama.cpp's
-# autoparser to build a working tool-call grammar for any model. This was
+# The image therefore bakes a tool-aware default into LLAMA_CHAT_TEMPLATE_FILE
+# at build time (ChatML for the default Phi-4 image; Gemma uses a separate
+# bundled template with native `<start_of_turn>` markers). Those bundled
+# templates render tools/tool_calls/tool-role messages, which is enough for
+# llama.cpp's autoparser to build a working tool-call grammar. This was
 # verified against the pinned llama.cpp runtime (build 10481, commit
 # 25ae3a9b3): GET /props reports chat_template_caps.supports_tools and
-# .supports_tool_calls as true with this template, and false with either the
+# .supports_tool_calls as true with these templates, and false with either the
 # model's own template or --chat-template chatml.
 # NOTE: if the pinned llama.cpp runtime (see the llama-runtime stage in
 # Dockerfile) is ever upgraded, re-verify this against the new build (start

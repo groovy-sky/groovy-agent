@@ -19,6 +19,12 @@ from `unsloth/Phi-4-mini-instruct-GGUF`, served locally by `llama-server`.
 The GGUF file is **never committed to git**; it is downloaded at
 build/run time (see below).
 
+The repository also publishes a Gemma variant,
+`ghcr.io/groovy-sky/groovy-agent:gemma-4-e2b-it`, built with
+`gemma-4-E2B-it-Q4_K_M.gguf` and a Gemma-native bundled chat template
+(`docker/chat-templates/tool-use-gemma.jinja`) so tool calling does not rely on
+ChatML control tokens that Gemma does not recognize.
+
 ## Architecture
 
 ```text
@@ -284,6 +290,12 @@ When using the published image from GHCR, the Phi-4 workflow now pushes:
 - immutable tags `ghcr.io/groovy-sky/groovy-agent:phi4-mini-<git-sha>` and
   `ghcr.io/groovy-sky/groovy-agent:phi4-mini-run-<workflow-run-number>`.
 
+The Gemma workflow follows the same pattern:
+
+- `ghcr.io/groovy-sky/groovy-agent:gemma-4-e2b-it` (moving tag), plus
+- immutable tags `ghcr.io/groovy-sky/groovy-agent:gemma-4-e2b-it-<git-sha>` and
+  `ghcr.io/groovy-sky/groovy-agent:gemma-4-e2b-it-run-<workflow-run-number>`.
+
 For deterministic deployments and debugging, prefer one of the immutable
 tags (or a digest) so you never pull a stale mutable manifest by accident.
 
@@ -320,6 +332,19 @@ HF_TOKEN=... DOWNLOAD_MODEL_AT_BUILD=1 ./scripts/package-image.sh
 (`HF_TOKEN` is optional and only needed for gated/rate-limited downloads.)
 This produces a local image (`groovy-agent:local` by default) and saves a
 tarball to `output/groovy-agent.tar`.
+
+To build the Gemma variant locally with its native default chat template baked
+in, override the model args used by the helper:
+
+```sh
+HF_TOKEN=... \
+DOWNLOAD_MODEL_AT_BUILD=1 \
+MODEL_URL=https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf \
+MODEL_FILENAME=gemma-4-E2B-it-Q4_K_M.gguf \
+MODEL_NAME=gemma-4-E2B-it \
+CHAT_TEMPLATE_FILE=/opt/llama/chat-templates/tool-use-gemma.jinja \
+./scripts/package-image.sh
+```
 
 ### Build without downloading the model (mount it instead)
 
@@ -627,7 +652,12 @@ This builds the `runtime` target with `DOWNLOAD_MODEL=0`, then checks:
   randomly initialized model whose architecture/tokenizer are valid but
   whose weights are never used to generate text), reports
   `chat_template_caps.supports_tools`/`supports_tool_calls: true` at
-  `GET /props` with the bundled default `LLAMA_CHAT_TEMPLATE_FILE`.
+  `GET /props` with the bundled default `LLAMA_CHAT_TEMPLATE_FILE`; and
+- the bundled Gemma template reports the same `/props` capabilities and renders
+  a prompt via `/apply-template` that uses Gemma `<start_of_turn>` /
+  `<end_of_turn>` markers plus the expected `<tool_call>` /
+  `<tool_response>` blocks, without leaking literal ChatML
+  `<|im_start|>` / `<|im_end|>` tokens.
 
 The llama-server/groovy-agent forwarding checks replace those two
 binaries inside the container with deterministic stub scripts (a
@@ -740,13 +770,15 @@ Container/`docker/entrypoint.sh` environment variables:
   values containing spaces, and never source this from untrusted input)
 - `LLAMA_CHAT_TEMPLATE_FILE` (default: a bundled tool-aware ChatML template,
   `docker/chat-templates/tool-use-chatml.jinja`, passed via
-  `--chat-template-file`): the bundled Phi-4-mini GGUF's own embedded chat
-  template does not render `tools`/`tool_calls`, so `--jinja` alone cannot
-  produce structured tool calls (`GET /props` would report
-  `chat_template_caps.supports_tools`/`supports_tool_calls: false`); this
-  default template does, which was verified against the pinned llama.cpp
-  runtime (build 10481, commit 25ae3a9b3) with `GET /props` reporting both
-  as `true`. Ignored when `LLAMA_CHAT_TEMPLATE` is set.
+  `--chat-template-file`), except for the published Gemma image which bakes in
+  `docker/chat-templates/tool-use-gemma.jinja` instead: the bundled
+  Phi-4-mini GGUF's own embedded chat template does not render
+  `tools`/`tool_calls`, so `--jinja` alone cannot produce structured tool calls
+  (`GET /props` would report `chat_template_caps.supports_tools`/
+  `supports_tool_calls: false`); these bundled override templates do, which was
+  verified against the pinned llama.cpp runtime (build 10481, commit
+  25ae3a9b3) with `GET /props` reporting both as `true`. Ignored when
+  `LLAMA_CHAT_TEMPLATE` is set.
 - `LLAMA_CHAT_TEMPLATE` (default unset; passed via `--chat-template`):
   operator override taking a llama.cpp built-in template name (e.g.
   `chatml` — note this one does **not** support tools) or raw Jinja source,
@@ -755,6 +787,7 @@ Container/`docker/entrypoint.sh` environment variables:
   `supports_tool_calls: true` at `GET /props`; otherwise Web UI/API tool
   calls silently stop working and the model reverts to free-generating
   pseudo-shell text instead of invoking the registered MCP tools.
+
 - `LLAMA_REPEAT_PENALTY` / `LLAMA_REPEAT_LAST_N` / `LLAMA_PREDICT_LIMIT`:
   sampling guardrails that curb small-model repetition loops
 - `LLAMA_MCP_COREUTILS` (default `1`): register the bundled read-only
@@ -803,6 +836,33 @@ Container/`docker/entrypoint.sh` environment variables:
   the `mcp` container mode (see
   [Run the remote MCP server](#run-the-remote-mcp-server-no-llama-server)
   above).
+
+### Troubleshooting chat-template/model mismatches
+
+If a model starts emitting literal chat markers such as `<|im_end|>` in normal
+assistant text, or keeps describing tools in prose instead of returning
+structured `<tool_call>...</tool_call>` blocks, the model/tokenizer is likely
+paired with the wrong chat template. Start with `GET /props`:
+
+- `chat_template_caps.supports_tools` /
+  `chat_template_caps.supports_tool_calls: true` only means the selected Jinja
+  template renders `tools` / `tool_calls`; it does **not** prove that the model
+  was trained on that turn syntax.
+- Check the reported tokenizer/control tokens (`bos_token`, `eos_token`,
+  `model_alias`) against the actual template markers. For example, Gemma models
+  need `<start_of_turn>user` / `<start_of_turn>model`, not ChatML
+  `<|im_start|>` / `<|im_end|>`.
+- Use `POST /apply-template` (or, for full manual verification, a direct
+  `POST /v1/chat/completions` request with a `tools` array) to inspect the
+  rendered prompt and confirm the right turn markers are present before
+  debugging tool invocation itself.
+- For the published Gemma image, the manual end-to-end check is: start
+  `ghcr.io/groovy-sky/groovy-agent:gemma-4-e2b-it` with
+  `LLAMA_MCP_WEBUTILS=1`, confirm `GET /tools` advertises
+  `webutils_search_web` and `webutils_browse_url`, then send a direct
+  `POST /v1/chat/completions` request instructing the model to call
+  `webutils_search_web`. A healthy run should return `finish_reason:
+  "tool_calls"` and should not leak literal `<|im_end|>` in assistant text.
 
 ## Quick smoke test
 

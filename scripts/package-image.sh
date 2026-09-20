@@ -9,6 +9,9 @@ DOWNLOAD_MODEL_AT_BUILD="${DOWNLOAD_MODEL_AT_BUILD:-0}"
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 
 build_args=(
+  --build-arg MODEL_FILENAME="${MODEL_FILENAME:-Phi-4-mini-instruct.Q8_0.gguf}"
+  --build-arg MODEL_NAME="${MODEL_NAME:-Phi-4-mini-instruct}"
+  --build-arg CHAT_TEMPLATE_FILE="${CHAT_TEMPLATE_FILE:-/opt/llama/chat-templates/tool-use-chatml.jinja}"
   --tag "$IMAGE_NAME"
   "$ROOT_DIR"
 )
