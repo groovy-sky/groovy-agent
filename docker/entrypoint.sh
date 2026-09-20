@@ -186,10 +186,14 @@ llama_chat_template_file_was_set=""
 if [[ ${LLAMA_CHAT_TEMPLATE_FILE+x} ]]; then
   llama_chat_template_file_was_set="1"
 fi
-llama_bundled_chat_template_file="/opt/llama/chat-templates/tool-use-chatml.jinja"
-if [[ "${LLAMA_MODEL_FILE,,}" == *gemma* || "${LLAMA_MODEL_NAME,,}" == *gemma* ]]; then
-  llama_bundled_chat_template_file="/opt/llama/chat-templates/tool-use-gemma.jinja"
-fi
+case "${LLAMA_MODEL_FILE,,}:${LLAMA_MODEL_NAME,,}" in
+  *gemma*:*|*:*gemma*)
+    llama_bundled_chat_template_file="/opt/llama/chat-templates/tool-use-gemma.jinja"
+    ;;
+  *)
+    llama_bundled_chat_template_file="/opt/llama/chat-templates/tool-use-chatml.jinja"
+    ;;
+esac
 LLAMA_CHAT_TEMPLATE="${LLAMA_CHAT_TEMPLATE-}"
 LLAMA_CHAT_TEMPLATE_FILE="${LLAMA_CHAT_TEMPLATE_FILE-$llama_bundled_chat_template_file}"
 LLAMA_EXTRA_ARGS="${LLAMA_EXTRA_ARGS:-}"
