@@ -787,6 +787,7 @@ echo "==> Verifying the bundled Gemma template at /props and /apply-template"
   --name "$CONTAINER_NAME" \
   -v "$ROOT_DIR/scripts/testdata/chat-template-smoke-model.gguf:/models/Phi-4-mini-instruct.Q8_0.gguf:ro" \
   -v "$WORK_DIR/output:/output" \
+  -e LLAMA_MODEL_FILE=Phi-4-mini-instruct.Q8_0.gguf \
   -e LLAMA_MODEL_NAME=gemma-4-E2B-it \
   -e LLAMA_CTX_SIZE=4096 \
   -e LLAMA_STARTUP_TIMEOUT="$props_startup_timeout" \
