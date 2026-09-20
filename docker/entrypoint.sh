@@ -237,7 +237,7 @@ fi
 
 if [[ "$LLAMA_MCP_COREUTILS" == "0" && "$LLAMA_MCP_WEBUTILS" == "0" \
   && -z "$llama_chat_template_was_set" \
-  && "$LLAMA_CHAT_TEMPLATE_FILE" == "$llama_bundled_chat_template_file" ]]; then
+  && -z "$llama_chat_template_file_was_set" ]]; then
   LLAMA_CHAT_TEMPLATE_FILE=""
 fi
 
