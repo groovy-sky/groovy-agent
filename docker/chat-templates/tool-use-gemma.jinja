@@ -108,21 +108,7 @@ Available tools:
                 {%- set tool_call = tool_call.function %}
             {%- endif %}
             {{- '\n<tool_call>\n' }}
-            {{- '{"name": ' + (tool_call.name | tojson) + ', "arguments": ' }}
-            {%- if tool_call.arguments is string %}
-                {%- set trimmed_arguments = tool_call.arguments | trim %}
-                {#- The generic tool-call contract expects a JSON object here.
-                    Inline only clearly object-shaped JSON strings; otherwise
-                    JSON-encode the string so the rendered <tool_call> stays valid. #}
-                {%- if trimmed_arguments == '{}' or (trimmed_arguments | length >= 5 and trimmed_arguments[0] == '{' and trimmed_arguments[1] == '"' and trimmed_arguments[-1] == '}' and '":' in trimmed_arguments) %}
-                    {{- trimmed_arguments }}
-                {%- else %}
-                    {{- tool_call.arguments | tojson }}
-                {%- endif %}
-            {%- else %}
-                {{- tool_call.arguments | tojson }}
-            {%- endif %}
-            {{- '}' }}
+            {{- {"name": tool_call.name, "arguments": tool_call.arguments} | tojson }}
             {{- '\n</tool_call>' }}
         {%- endfor %}
         {{- '<end_of_turn>\n' }}
