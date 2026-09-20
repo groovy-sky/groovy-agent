@@ -36,13 +36,16 @@
 #      not started in this mode), and completes a real `initialize` /
 #      `notifications/initialized` / `tools/list` / `tools/call` (`pwd`)
 #      exchange against the actual `coreutils-mcp` binary.
-#   7. The bundled tool-aware chat template (docker/entrypoint.sh's default
-#      `--chat-template-file`) makes the real `llama-server` binary report
-#      `chat_template_caps.supports_tools`/`supports_tool_calls: true` at
-#      `GET /props`, and its `/cors-proxy` endpoint confirms `--ui-mcp-proxy`
-#      is actually active, using a tiny committed placeholder GGUF
-#      (scripts/testdata/chat-template-smoke-model.gguf) so no ~4GB model
-#      download or real text-generation inference is required.
+#   7. The bundled tool-aware chat templates make the real `llama-server`
+#      binary report `chat_template_caps.supports_tools`/
+#      `supports_tool_calls: true` at `GET /props`, and its `/cors-proxy`
+#      endpoint confirms `--ui-mcp-proxy` is actually active, using a tiny
+#      committed placeholder GGUF (scripts/testdata/chat-template-smoke-model.gguf)
+#      so no ~4GB model download or real text-generation inference is required.
+#      The default Phi-4 ChatML template is checked directly, and the bundled
+#      Gemma template is checked by explicitly selecting it and rendering a
+#      conversation through llama.cpp's `/apply-template` endpoint to verify
+#      Gemma turn markers plus `<tool_call>` / `<tool_response>` formatting.
 #
 # Test 2 replaces `llama-server` and `groovy-agent` inside the container with
 # small deterministic stubs (a Python HTTP server that answers /health, and a
@@ -55,7 +58,18 @@
 # only via `docker exec`, never a published port); its placeholder GGUF has a
 # valid tiny architecture/tokenizer so the server starts and answers
 # `/props`, but randomly initialized weights, so it is never used to
-# generate text.
+# generate text. The Gemma-specific check below still does **not** prove that
+# real Gemma weights will choose to emit a structured tool call or that the
+# full MCP/webutils round-trip works end to end; it only proves that the
+# bundled Gemma template is accepted by the real runtime, advertises tool-call
+# support at `/props`, and renders the expected prompt structure at
+# `/apply-template`. Maintainers should still manually verify the published
+# `ghcr.io/groovy-sky/groovy-agent:gemma-4-e2b-it` image with:
+#   - `curl http://127.0.0.1:8080/props`
+#   - `curl http://127.0.0.1:8080/tools`
+#   - `curl http://127.0.0.1:8080/v1/chat/completions ...`
+# and confirm `finish_reason: "tool_calls"` plus no literal `<|im_end|>`
+# leakage in assistant text.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -764,6 +778,167 @@ if [[ "$cors_proxy_status" == "403" || -z "$cors_proxy_status" ]]; then
   exit 1
 fi
 echo "    /cors-proxy responds (status $cors_proxy_status), confirming --ui-mcp-proxy is enabled"
+"$CONTAINER_ENGINE" stop -t 15 "$CONTAINER_NAME" >/dev/null 2>&1 || true
+"$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+echo "==> Verifying the bundled Gemma template at /props and /apply-template"
+"$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+"$CONTAINER_ENGINE" run -d \
+  --name "$CONTAINER_NAME" \
+  -v "$ROOT_DIR/scripts/testdata/chat-template-smoke-model.gguf:/models/Phi-4-mini-instruct.Q8_0.gguf:ro" \
+  -v "$WORK_DIR/output:/output" \
+  -e LLAMA_MODEL_NAME=gemma-4-E2B-it \
+  -e LLAMA_CTX_SIZE=4096 \
+  -e LLAMA_STARTUP_TIMEOUT="$props_startup_timeout" \
+  -e LLAMA_CHAT_TEMPLATE_FILE=/opt/llama/chat-templates/tool-use-gemma.jinja \
+  "$IMAGE_NAME" >/dev/null
+
+gemma_props_deadline=$((SECONDS + props_startup_timeout + props_deadline_slack_seconds))
+gemma_props_response=""
+until [[ -n "$gemma_props_response" ]]; do
+  if (( SECONDS >= gemma_props_deadline )); then
+    echo "FAIL: Gemma-template llama-server did not become ready to serve /props in time" >&2
+    "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" >&2 || true
+    exit 1
+  fi
+  if [[ "$("$CONTAINER_ENGINE" inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" != "true" ]]; then
+    echo "FAIL: Gemma-template llama-server container exited before serving /props" >&2
+    "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" >&2 || true
+    exit 1
+  fi
+  gemma_props_response="$("$CONTAINER_ENGINE" exec "$CONTAINER_NAME" \
+    curl -fsS "http://127.0.0.1:8080/props" 2>/dev/null || true)"
+  [[ -n "$gemma_props_response" ]] || sleep 1
+done
+
+if ! gemma_props_caps="$(python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+    caps = doc["chat_template_caps"]
+    ok = bool(caps.get("supports_tools")) and bool(caps.get("supports_tool_calls"))
+except Exception as exc:
+    print(f"error parsing /props: {exc}", file=sys.stderr)
+    sys.exit(1)
+print(json.dumps(caps))
+sys.exit(0 if ok else 1)
+' <<< "$gemma_props_response")"; then
+  echo "FAIL: Gemma template /props does not report chat_template_caps.supports_tools/supports_tool_calls: true" >&2
+  echo "$gemma_props_response" >&2
+  exit 1
+fi
+echo "    Gemma template /props reports chat_template_caps: $gemma_props_caps"
+
+gemma_apply_template_request="$(cat <<'EOF'
+{
+  "messages": [
+    {"role": "system", "content": "System says: use the provided tools when the user asks for fresh web information."},
+    {"role": "user", "content": "Search the web for the latest groovy-agent release notes."},
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "webutils_search_web",
+            "arguments": {
+              "query": "groovy-agent latest release notes"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "{\"results\":[{\"title\":\"Release notes\",\"url\":\"https://example.invalid/release-notes\"}]}"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "webutils_search_web",
+        "description": "Search the public web.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {"type": "string"}
+          },
+          "required": ["query"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "webutils_browse_url",
+        "description": "Browse a public HTTPS URL.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "url": {"type": "string"}
+          },
+          "required": ["url"]
+        }
+      }
+    }
+  ],
+  "add_generation_prompt": true
+}
+EOF
+)"
+gemma_rendered_prompt="$(
+  printf '%s' "$gemma_apply_template_request" \
+    | "$CONTAINER_ENGINE" exec -i "$CONTAINER_NAME" curl -fsS \
+        -H 'Content-Type: application/json' \
+        --data-binary @- \
+        "http://127.0.0.1:8080/apply-template" \
+        2>/dev/null || true
+)"
+if [[ -z "$gemma_rendered_prompt" ]]; then
+  echo "FAIL: /apply-template returned an empty response for the Gemma template" >&2
+  exit 1
+fi
+if ! gemma_prompt_summary="$(python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+    prompt = doc["prompt"]
+except Exception as exc:
+    print(f"error parsing /apply-template response: {exc}", file=sys.stderr)
+    sys.exit(1)
+checks = [
+    ("<start_of_turn>user\nSystem says:", "missing Gemma user turn with folded system prompt"),
+    ("Search the web for the latest groovy-agent release notes.", "missing user content"),
+    ("webutils_search_web", "missing rendered tool schema/tool call"),
+    ("webutils_browse_url", "missing rendered browse tool schema"),
+    ("<tool_call>", "missing rendered tool call block"),
+    ("<tool_response>", "missing rendered tool response block"),
+    ("<start_of_turn>model\n", "missing Gemma model generation prompt")
+]
+for needle, error in checks:
+    if needle not in prompt:
+        print(error, file=sys.stderr)
+        sys.exit(1)
+for bad in ("<|im_start|>", "<|im_end|>"):
+    if bad in prompt:
+        print(f"unexpected ChatML marker in Gemma prompt: {bad}", file=sys.stderr)
+        sys.exit(1)
+if prompt.index("System says:") > prompt.index("Search the web for the latest groovy-agent release notes."):
+    print("system prompt was not folded ahead of the first user message", file=sys.stderr)
+    sys.exit(1)
+print(json.dumps({
+    "prefix": prompt[:220],
+    "contains_tool_call": "<tool_call>" in prompt,
+    "contains_tool_response": "<tool_response>" in prompt
+}))
+' <<< "$gemma_rendered_prompt")"; then
+  echo "FAIL: Gemma template /apply-template did not render the expected prompt shape" >&2
+  echo "$gemma_rendered_prompt" >&2
+  exit 1
+fi
+echo "    Gemma template /apply-template rendered the expected prompt shape: $gemma_prompt_summary"
 "$CONTAINER_ENGINE" stop -t 15 "$CONTAINER_NAME" >/dev/null 2>&1 || true
 "$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 

@@ -1,0 +1,103 @@
+{#-
+  Tool-aware Gemma chat template.
+
+  Gemma's instruction/chat format is not ChatML: it uses
+  `<start_of_turn>user ... <end_of_turn>` /
+  `<start_of_turn>model ... <end_of_turn>` markers and does not support a
+  distinct `system` role. If the container renders the ChatML template for a
+  Gemma tokenizer, literal `<|im_start|>` / `<|im_end|>` markers leak into the
+  prompt/output because they are plain text for that model family, not control
+  tokens.
+
+  This template keeps the same OpenAI-style `tools` rendering and
+  `<tool_call>{"name": ..., "arguments": ...}</tool_call>` /
+  `<tool_response>...</tool_response>` convention as the bundled ChatML
+  template, because llama.cpp's Generic/autoparser tool-calling path builds its
+  grammar from that convention. The Gemma-specific part is only the outer turn
+  structure and the rule that any `system` prompt content must be folded into
+  the beginning of the first `user` turn instead of being emitted as an
+  unsupported role.
+#}
+{%- macro render_tools(tools) -%}
+You can call the following tools to help answer the user. For each call, return a json object with the tool name and arguments within <tool_call></tool_call> XML tags, for example:
+<tool_call>
+{"name": <tool-name>, "arguments": <args-json-object>}
+</tool_call>
+
+Available tools:
+<tools>
+{%- for tool in tools %}
+{%- if tool.function is defined %}
+{%- set tool = tool.function %}
+{%- endif %}
+{{- tool | tojson }}
+{{- '\n' }}
+{%- endfor %}
+</tools>
+{%- endmacro -%}
+{%- macro render_first_user_prefix(system_prompt, tools) -%}
+{%- if system_prompt %}
+{{- system_prompt }}
+{%- endif %}
+{%- if tools %}
+{%- if system_prompt %}
+{{- '\n\n' }}
+{%- endif %}
+{{- render_tools(tools) }}
+{%- endif %}
+{%- endmacro -%}
+{{- bos_token }}
+{%- set ns = namespace(system_prompt='', first_user_emitted=false) -%}
+{%- for message in messages %}
+    {%- if message.role == 'system' and message.content %}
+        {%- if ns.system_prompt %}
+            {%- set ns.system_prompt = ns.system_prompt + '\n\n' + message.content %}
+        {%- else %}
+            {%- set ns.system_prompt = message.content %}
+        {%- endif %}
+    {%- endif %}
+{%- endfor %}
+{%- for message in messages %}
+    {%- if message.role == 'system' %}
+    {%- elif message.role == 'user' %}
+        {{- '<start_of_turn>user\n' }}
+        {%- if not ns.first_user_emitted %}
+            {{- render_first_user_prefix(ns.system_prompt, tools) }}
+            {%- if message.content and (ns.system_prompt or tools) %}
+{{- '\n\n' }}
+            {%- endif %}
+            {%- set ns.first_user_emitted = true %}
+        {%- endif %}
+        {{- message.content }}
+        {{- '<end_of_turn>\n' }}
+    {%- elif message.role == 'assistant' %}
+        {{- '<start_of_turn>model\n' }}
+        {%- if message.content %}
+            {{- message.content }}
+        {%- endif %}
+        {%- for tool_call in message.tool_calls | default([]) %}
+            {%- if tool_call.function is defined %}
+                {%- set tool_call = tool_call.function %}
+            {%- endif %}
+            {{- '\n<tool_call>\n{"name": "' + tool_call.name + '", "arguments": ' }}
+            {%- if tool_call.arguments is string %}
+                {{- tool_call.arguments }}
+            {%- else %}
+                {{- tool_call.arguments | tojson }}
+            {%- endif %}
+            {{- '}\n</tool_call>' }}
+        {%- endfor %}
+        {{- '<end_of_turn>\n' }}
+    {%- elif message.role == 'tool' %}
+        {{- '<start_of_turn>user\n<tool_response>\n' + message.content + '\n</tool_response><end_of_turn>\n' }}
+    {%- endif %}
+{%- endfor %}
+{%- if not ns.first_user_emitted and (ns.system_prompt or tools) %}
+    {{- '<start_of_turn>user\n' }}
+    {{- render_first_user_prefix(ns.system_prompt, tools) }}
+    {{- '<end_of_turn>\n' }}
+    {%- set ns.first_user_emitted = true %}
+{%- endif %}
+{%- if add_generation_prompt %}
+    {{- '<start_of_turn>model\n' }}
+{%- endif %}

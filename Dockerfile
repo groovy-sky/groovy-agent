@@ -84,6 +84,7 @@ FROM llama-runtime AS runtime
 # Snap stub with copied browser fragments or a second package install strategy.
 ARG MODEL_FILENAME="Phi-4-mini-instruct.Q8_0.gguf"
 ARG MODEL_NAME="Phi-4-mini-instruct"
+ARG CHAT_TEMPLATE_FILE="/opt/llama/chat-templates/tool-use-chatml.jinja"
 ARG AGENT_UID=10001
 ARG AGENT_GID=10001
 
@@ -94,6 +95,7 @@ ENV LLAMA_SERVER_HOST=0.0.0.0 \
     LLAMA_SERVER_PORT=8080 \
     LLAMA_MODEL_FILE=${MODEL_FILENAME} \
     LLAMA_MODEL_NAME=${MODEL_NAME} \
+    LLAMA_CHAT_TEMPLATE_FILE=${CHAT_TEMPLATE_FILE} \
     LLAMA_CTX_SIZE=81920 \
     LLAMA_THREADS=0 \
     LLAMA_N_GPU_LAYERS=0 \

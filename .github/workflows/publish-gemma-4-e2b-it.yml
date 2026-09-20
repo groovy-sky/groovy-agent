@@ -40,17 +40,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute image tags and labels
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ env.IMAGE_TAG }}
+            type=sha,format=long,prefix=${{ env.IMAGE_TAG }}-
+            type=raw,value=${{ env.IMAGE_TAG }}-run-${{ github.run_number }}
+
       - name: Build and push image with gemma-4-E2B-it-Q4_K_M
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
           build-args: |
             DOWNLOAD_MODEL=1
             MODEL_URL=https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf
             MODEL_FILENAME=gemma-4-E2B-it-Q4_K_M.gguf
             MODEL_NAME=gemma-4-E2B-it
+            CHAT_TEMPLATE_FILE=/opt/llama/chat-templates/tool-use-gemma.jinja
           secrets: |
             hf_token=${{ secrets.HF_TOKEN }}
           cache-from: type=gha
