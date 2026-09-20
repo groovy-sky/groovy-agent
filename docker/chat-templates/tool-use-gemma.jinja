@@ -117,7 +117,7 @@ Available tools:
         {%- endfor %}
         {{- '<end_of_turn>\n' }}
     {%- elif message.role == 'tool' %}
-        {{- '<start_of_turn>user\n<tool_response>\n' + render_content(message.content) + '\n</tool_response><end_of_turn>\n' }}
+        {{- '<start_of_turn>user\n<tool_response>\n' + render_content(message.content) + '\n</tool_response>\n<end_of_turn>\n' }}
     {%- endif %}
 {%- endfor %}
 {%- if add_generation_prompt %}
