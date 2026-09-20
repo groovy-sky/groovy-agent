@@ -54,20 +54,6 @@ Available tools:
 {{- content | tojson -}}
 {%- endif -%}
 {%- endmacro -%}
-{%- macro render_tool_response_payload(content) -%}
-{%- if content is string -%}
-{%- set trimmed = content | trim -%}
-{%- if trimmed and (trimmed[:1] == '{' or trimmed[:1] == '[') -%}
-{{- trimmed -}}
-{%- else -%}
-{{- content | tojson -}}
-{%- endif -%}
-{%- elif content is not none -%}
-{{- content | tojson -}}
-{%- else -%}
-null
-{%- endif -%}
-{%- endmacro -%}
 {%- macro render_first_user_prefix(system_prompt, tools) -%}
 {%- if system_prompt %}
 {{- system_prompt }}
@@ -121,24 +107,18 @@ null
             {%- if tool_call.function is defined %}
                 {%- set tool_call = tool_call.function %}
             {%- endif %}
-            {{- '\n<tool_call>\n{"name": "' + tool_call.name + '", "arguments": ' }}
-            {%- if tool_call.arguments is string %}
-                {{- tool_call.arguments }}
-            {%- else %}
-                {{- tool_call.arguments | tojson }}
-            {%- endif %}
-            {{- '}\n</tool_call>' }}
+            {{- '\n<tool_call>\n' }}
+            {{- {"name": tool_call.name, "arguments": tool_call.arguments} | tojson }}
+            {{- '\n</tool_call>' }}
         {%- endfor %}
         {{- '<end_of_turn>\n' }}
     {%- elif message.role == 'tool' %}
         {{- '<start_of_turn>user\n<tool_response>\n' }}
         {%- if message.tool_call_id is defined and message.tool_call_id %}
-            {{- '{"tool_call_id": ' + (message.tool_call_id | tojson) + ', "content": ' }}
-            {{- render_tool_response_payload(message.content) }}
-            {{- '}' }}
-        {%- else %}
-            {{- render_content(message.content) }}
+            {{- {"tool_call_id": message.tool_call_id} | tojson }}
+            {{- '\n' }}
         {%- endif %}
+        {{- render_content(message.content) }}
         {{- '\n</tool_response>\n<end_of_turn>\n' }}
     {%- endif %}
 {%- endfor %}

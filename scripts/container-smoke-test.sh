@@ -926,7 +926,7 @@ checks = [
     ("<tool_call>", "missing rendered tool call block"),
     ("<tool_response>", "missing rendered tool response block"),
     ("\"tool_call_id\": \"call_1\"", "missing rendered tool_call_id"),
-    ("\"content\": {\"results\":[", "tool response JSON payload was double-encoded"),
+    ("{\"results\":[", "tool response JSON payload was not preserved"),
     ("<start_of_turn>model\n", "missing Gemma model generation prompt")
 ]
 for needle, error in checks:
