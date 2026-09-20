@@ -54,6 +54,20 @@ Available tools:
 {{- content | tojson -}}
 {%- endif -%}
 {%- endmacro -%}
+{%- macro render_tool_response_payload(content) -%}
+{%- if content is string -%}
+{%- set trimmed = content | trim -%}
+{%- if trimmed and (trimmed[:1] == '{' or trimmed[:1] == '[') -%}
+{{- trimmed -}}
+{%- else -%}
+{{- content | tojson -}}
+{%- endif -%}
+{%- elif content is not none -%}
+{{- content | tojson -}}
+{%- else -%}
+null
+{%- endif -%}
+{%- endmacro -%}
 {%- macro render_first_user_prefix(system_prompt, tools) -%}
 {%- if system_prompt %}
 {{- system_prompt }}
@@ -119,7 +133,9 @@ Available tools:
     {%- elif message.role == 'tool' %}
         {{- '<start_of_turn>user\n<tool_response>\n' }}
         {%- if message.tool_call_id is defined and message.tool_call_id %}
-            {{- {"tool_call_id": message.tool_call_id, "content": message.content} | tojson }}
+            {{- '{"tool_call_id": ' + (message.tool_call_id | tojson) + ', "content": ' }}
+            {{- render_tool_response_payload(message.content) }}
+            {{- '}' }}
         {%- else %}
             {{- render_content(message.content) }}
         {%- endif %}
