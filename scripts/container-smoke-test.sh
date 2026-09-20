@@ -785,9 +785,9 @@ echo "==> Verifying the bundled Gemma template at /props and /apply-template"
 "$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 "$CONTAINER_ENGINE" run -d \
   --name "$CONTAINER_NAME" \
-  -v "$ROOT_DIR/scripts/testdata/chat-template-smoke-model.gguf:/models/Phi-4-mini-instruct.Q8_0.gguf:ro" \
+  -v "$ROOT_DIR/scripts/testdata/chat-template-smoke-model.gguf:/models/gemma-4-E2B-it-Q4_K_M.gguf:ro" \
   -v "$WORK_DIR/output:/output" \
-  -e LLAMA_MODEL_FILE=Phi-4-mini-instruct.Q8_0.gguf \
+  -e LLAMA_MODEL_FILE=gemma-4-E2B-it-Q4_K_M.gguf \
   -e LLAMA_MODEL_NAME=gemma-4-E2B-it \
   -e LLAMA_CTX_SIZE=4096 \
   -e LLAMA_STARTUP_TIMEOUT="$props_startup_timeout" \
