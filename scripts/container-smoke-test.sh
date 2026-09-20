@@ -939,6 +939,70 @@ print(json.dumps({
   exit 1
 fi
 echo "    Gemma template /apply-template rendered the expected prompt shape: $gemma_prompt_summary"
+
+gemma_no_user_request="$(cat <<'EOF'
+{
+  "messages": [
+    {"role": "system", "content": "Synthetic first user instructions."},
+    {"role": "assistant", "content": "Earlier assistant context."}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "webutils_search_web",
+        "description": "Search the public web.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {"type": "string"}
+          },
+          "required": ["query"]
+        }
+      }
+    }
+  ],
+  "add_generation_prompt": true
+}
+EOF
+)"
+gemma_no_user_rendered_prompt="$(
+  printf '%s' "$gemma_no_user_request" \
+    | "$CONTAINER_ENGINE" exec -i "$CONTAINER_NAME" curl -fsS \
+        -H 'Content-Type: application/json' \
+        --data-binary @- \
+        "http://127.0.0.1:8080/apply-template" \
+        2>/dev/null || true
+)"
+if [[ -z "$gemma_no_user_rendered_prompt" ]]; then
+  echo "FAIL: /apply-template returned an empty response for the Gemma no-user edge case" >&2
+  exit 1
+fi
+if ! python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+    prompt = doc["prompt"]
+except Exception as exc:
+    print(f"error parsing no-user /apply-template response: {exc}", file=sys.stderr)
+    sys.exit(1)
+required = [
+    "<start_of_turn>user\nSynthetic first user instructions.",
+    "Earlier assistant context."
+]
+for needle in required:
+    if needle not in prompt:
+        print(f"missing expected content: {needle}", file=sys.stderr)
+        sys.exit(1)
+if prompt.index("<start_of_turn>user\nSynthetic first user instructions.") > prompt.index("Earlier assistant context."):
+    print("synthetic first user turn was emitted after assistant history", file=sys.stderr)
+    sys.exit(1)
+' <<< "$gemma_no_user_rendered_prompt"; then
+  echo "FAIL: Gemma template no-user edge case rendered out of order" >&2
+  echo "$gemma_no_user_rendered_prompt" >&2
+  exit 1
+fi
+echo "    Gemma template keeps the synthetic first user turn ahead of assistant-only history"
 "$CONTAINER_ENGINE" stop -t 15 "$CONTAINER_NAME" >/dev/null 2>&1 || true
 "$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 

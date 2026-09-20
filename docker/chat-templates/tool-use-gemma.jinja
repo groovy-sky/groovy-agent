@@ -47,7 +47,7 @@ Available tools:
 {%- endif %}
 {%- endmacro -%}
 {{- bos_token }}
-{%- set ns = namespace(system_prompt='', first_user_emitted=false) -%}
+{%- set ns = namespace(system_prompt='', first_user_emitted=false, has_user=false) -%}
 {%- for message in messages %}
     {%- if message.role == 'system' and message.content %}
         {%- if ns.system_prompt %}
@@ -55,8 +55,16 @@ Available tools:
         {%- else %}
             {%- set ns.system_prompt = message.content %}
         {%- endif %}
+    {%- elif message.role == 'user' %}
+        {%- set ns.has_user = true %}
     {%- endif %}
 {%- endfor %}
+{%- if not ns.has_user and (ns.system_prompt or tools) %}
+    {{- '<start_of_turn>user\n' }}
+    {{- render_first_user_prefix(ns.system_prompt, tools) }}
+    {{- '<end_of_turn>\n' }}
+    {%- set ns.first_user_emitted = true %}
+{%- endif %}
 {%- for message in messages %}
     {%- if message.role == 'system' %}
     {%- elif message.role == 'user' %}
@@ -92,12 +100,6 @@ Available tools:
         {{- '<start_of_turn>user\n<tool_response>\n' + message.content + '\n</tool_response><end_of_turn>\n' }}
     {%- endif %}
 {%- endfor %}
-{%- if not ns.first_user_emitted and (ns.system_prompt or tools) %}
-    {{- '<start_of_turn>user\n' }}
-    {{- render_first_user_prefix(ns.system_prompt, tools) }}
-    {{- '<end_of_turn>\n' }}
-    {%- set ns.first_user_emitted = true %}
-{%- endif %}
 {%- if add_generation_prompt %}
     {{- '<start_of_turn>model\n' }}
 {%- endif %}
