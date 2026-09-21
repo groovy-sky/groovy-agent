@@ -1,0 +1,68 @@
+name: Build and publish MiniCPM5-2B image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile
+      - cmd/**
+      - docker/**
+      - coreutils/**
+      - internal/**
+      - go.mod
+      - .github/workflows/publish-minicpm5-2b.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/groovy-agent
+  IMAGE_TAG: minicpm5-2b
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags and labels
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ env.IMAGE_TAG }}
+            type=sha,format=long,prefix=${{ env.IMAGE_TAG }}-
+            type=raw,value=${{ env.IMAGE_TAG }}-run-${{ github.run_number }}
+
+      - name: Build and push image with MiniCPM5-2B-Q4_K_M
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            DOWNLOAD_MODEL=1
+            MODEL_URL=https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/blob/main/MiniCPM5-2B-Q4_K_M.gguf
+            MODEL_FILENAME=MiniCPM5-2B-Q4_K_M.gguf
+            MODEL_NAME=MiniCPM5-2B
+          secrets: |
+            hf_token=${{ secrets.HF_TOKEN }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
