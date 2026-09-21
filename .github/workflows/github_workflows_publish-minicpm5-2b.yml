@@ -59,7 +59,7 @@ jobs:
           labels: ${{ steps.metadata.outputs.labels }}
           build-args: |
             DOWNLOAD_MODEL=1
-            MODEL_URL=https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/blob/main/MiniCPM5-2B-Q4_K_M.gguf
+            MODEL_URL=https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/resolve/main/MiniCPM5-2B-Q4_K_M.gguf
             MODEL_FILENAME=MiniCPM5-2B-Q4_K_M.gguf
             MODEL_NAME=MiniCPM5-2B
           secrets: |
