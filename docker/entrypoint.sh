@@ -220,13 +220,22 @@ LLAMA_PREDICT_LIMIT="${LLAMA_PREDICT_LIMIT:-1024}"
 #
 # - LLAMA_MCP_COREUTILS: set to 0 to start llama-server without the bundled
 #   MCP tool set.
+# - LLAMA_MCP_WEBUTILS_ONLY: set to 1 to force a smaller web-only MCP tool set
+#   (`LLAMA_MCP_COREUTILS=0`, `LLAMA_MCP_WEBUTILS=1`), which is useful for
+#   llama.cpp runtimes/models that reject the combined tool grammar as too
+#   complex.
 # - LLAMA_MCP_WORKSPACE: directory the registered tools are confined to; every
 #   tool call stays inside it, exactly as in the standalone `mcp` mode.
 LLAMA_MCP_COREUTILS="${LLAMA_MCP_COREUTILS:-1}"
 LLAMA_MCP_WORKSPACE="${LLAMA_MCP_WORKSPACE:-${MCP_WORKSPACE:-${AGENT_OUTPUT_DIR:-/output}}}"
 LLAMA_MCP_WEBUTILS="${LLAMA_MCP_WEBUTILS:-0}"
+LLAMA_MCP_WEBUTILS_ONLY="${LLAMA_MCP_WEBUTILS_ONLY:-0}"
 AGENT_WEB_MCP_COMMAND="${AGENT_WEB_MCP_COMMAND:-}"
 AGENT_MAX_TOOL_CALLS_PER_TURN="${AGENT_MAX_TOOL_CALLS_PER_TURN:-3}"
+if [[ "$LLAMA_MCP_WEBUTILS_ONLY" != "0" ]]; then
+  LLAMA_MCP_COREUTILS=0
+  LLAMA_MCP_WEBUTILS=1
+fi
 use_openai_proxy=0
 if [[ "$LLAMA_MCP_COREUTILS" != "0" || "$LLAMA_MCP_WEBUTILS" != "0" ]]; then
   use_openai_proxy=1
@@ -409,18 +418,21 @@ fi
 
 if [[ "$LLAMA_MCP_COREUTILS" != "0" || "$LLAMA_MCP_WEBUTILS" != "0" ]]; then
   mcp_servers_entries=()
-  if [[ "$LLAMA_MCP_WORKSPACE" != /* ]]; then
-    echo "LLAMA_MCP_WORKSPACE must be an absolute path: $LLAMA_MCP_WORKSPACE" >&2
-    echo "llama-server spawns the MCP server itself, so a relative path would" >&2
-    echo "be resolved against llama-server's working directory." >&2
-    exit 1
+  if [[ "$LLAMA_MCP_WEBUTILS_ONLY" != "0" ]]; then
+    echo "LLAMA_MCP_WEBUTILS_ONLY is enabled: forcing bundled MCP registration to webutils only" >&2
   fi
-  if [[ "$LLAMA_MCP_WORKSPACE" == *[[:cntrl:]]* ]]; then
-    echo "LLAMA_MCP_WORKSPACE must not contain control characters" >&2
-    exit 1
-  fi
-  ensure_writable_dir "$LLAMA_MCP_WORKSPACE" "llama MCP workspace"
   if [[ "$LLAMA_MCP_COREUTILS" != "0" ]]; then
+    if [[ "$LLAMA_MCP_WORKSPACE" != /* ]]; then
+      echo "LLAMA_MCP_WORKSPACE must be an absolute path: $LLAMA_MCP_WORKSPACE" >&2
+      echo "llama-server spawns the MCP server itself, so a relative path would" >&2
+      echo "be resolved against llama-server's working directory." >&2
+      exit 1
+    fi
+    if [[ "$LLAMA_MCP_WORKSPACE" == *[[:cntrl:]]* ]]; then
+      echo "LLAMA_MCP_WORKSPACE must not contain control characters" >&2
+      exit 1
+    fi
+    ensure_writable_dir "$LLAMA_MCP_WORKSPACE" "llama MCP workspace"
     mcp_servers_entries+=("$(printf '"coreutils":{"command":"/usr/local/bin/coreutils-mcp","args":["--workspace","%s","--transport","stdio"]}' "$(json_escape "$LLAMA_MCP_WORKSPACE")")")
     echo "registering bundled coreutils MCP server with llama-server (stdio)" >&2
     echo "MCP tool workspace: ${LLAMA_MCP_WORKSPACE} (read-only tools)" >&2
