@@ -24,13 +24,14 @@
 #      `llama-server`, does not require a local model file, still forwards the
 #      bundled MCP command to one-shot `groovy-agent`, and rejects no-prompt
 #      serve mode with a clear diagnostic.
-#   5. The real `llama-server` binary spawns the bundled `coreutils-mcp` over
-#      stdio from the entrypoint's `--mcp-servers-json` registration and
-#      discovers its tools (this happens before the model is loaded, so a
-#      placeholder model file is enough), and is also started with
+#   5. The real `llama-server` binary spawns the bundled MCP servers from the
+#      entrypoint's `--mcp-servers-json` registration and discovers their tools
+#      (this happens before the model is loaded, so a placeholder model file is
+#      enough); smoke coverage also checks that `LLAMA_MCP_WEBUTILS_ONLY=1`
+#      shrinks that registration to just `webutils-mcp`, and that
 #      `--ui-mcp-proxy` (mirroring groovy-sky/local-ai's
-#      `LLAMA_ARG_UI_MCP_PROXY=true`) so its Web UI can reach further,
-#      browser-added MCP servers.
+#      `LLAMA_ARG_UI_MCP_PROXY=true`) remains enabled while MCP tools are
+#      registered.
 #   6. `docker run ... mcp` serves the bundled coreutils MCP tool set over the
 #      MCP Streamable HTTP transport, independently of llama-server (which is
 #      not started in this mode), and completes a real `initialize` /
@@ -527,6 +528,34 @@ if grep -qx -- "--ui-mcp-proxy" "$WORK_DIR/output/llama-argv.txt"; then
   exit 1
 fi
 echo "    LLAMA_MCP_COREUTILS=0 starts llama-server without MCP servers or the UI proxy"
+
+# LLAMA_MCP_WEBUTILS_ONLY trades the larger combined coreutils+webutils grammar
+# for a web-only MCP registration, keeping the proxy path active while omitting
+# the bundled coreutils tool set entirely.
+EXTRA_RUN_ENV=(-e LLAMA_MCP_WEBUTILS_ONLY=1)
+run_forwarding_case "webutils-only MCP registration" --workspace /output "test prompt"
+EXTRA_RUN_ENV=()
+if ! grep -qx -- "--mcp-servers-json" "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: LLAMA_MCP_WEBUTILS_ONLY=1 must still register bundled MCP servers" >&2
+  exit 1
+fi
+if ! grep -q '"command":"/usr/local/bin/webutils-mcp"' "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: LLAMA_MCP_WEBUTILS_ONLY=1 must register webutils-mcp" >&2
+  exit 1
+fi
+if grep -q '"command":"/usr/local/bin/coreutils-mcp"' "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: LLAMA_MCP_WEBUTILS_ONLY=1 must not register coreutils-mcp" >&2
+  exit 1
+fi
+if grep -q '"--workspace","/output"' "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: LLAMA_MCP_WEBUTILS_ONLY=1 must not pass the coreutils workspace into the MCP config" >&2
+  exit 1
+fi
+if ! grep -qx -- "--ui-mcp-proxy" "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: LLAMA_MCP_WEBUTILS_ONLY=1 must keep the MCP UI proxy enabled by default" >&2
+  exit 1
+fi
+echo "    LLAMA_MCP_WEBUTILS_ONLY=1 registers only webutils-mcp and keeps proxy mode enabled"
 
 # With both bundled MCP servers disabled and no explicit template override, the
 # entrypoint must not force a bundled tool-aware template file.

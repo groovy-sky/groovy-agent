@@ -442,6 +442,14 @@ built-in Web UI consumes.
 - `coreutils-mcp` by default (`LLAMA_MCP_COREUTILS=1`);
 - `webutils-mcp` only when explicitly opted in (`LLAMA_MCP_WEBUTILS=1`).
 
+If a model/runtime (notably the published Gemma image on the pinned llama.cpp
+build) rejects the combined coreutils+webutils tool grammar with an error like
+`failed to parse grammar` / `number of rules ... exceeds sane defaults`, start
+the container with `LLAMA_MCP_WEBUTILS_ONLY=1`. That opt-in mode forces
+`LLAMA_MCP_COREUTILS=0` and `LLAMA_MCP_WEBUTILS=1`, so llama.cpp only sees the
+web browsing tools and avoids the oversized combined grammar while keeping the
+OpenAI-compatible proxy path enabled.
+
 Nothing extra has to be started or published, and startup logs show discovery:
 
 ```text
@@ -499,6 +507,10 @@ Usage and limitations:
 - Set `LLAMA_MCP_COREUTILS=0` and `LLAMA_MCP_WEBUTILS=0` to start
   `llama-server` without bundled MCP tools. `LLAMA_MCP_WORKSPACE=/some/dir`
   changes only the coreutils workspace.
+- Set `LLAMA_MCP_WEBUTILS_ONLY=1` to force a web-browsing-only MCP
+  registration (`webutils_search_web` / `webutils_browse_url`, no bundled
+  coreutils tools). This is primarily a compatibility workaround for
+  llama.cpp grammar-complexity failures on some tool-aware models.
 
 ```sh
 docker run --rm \
@@ -795,6 +807,11 @@ Container/`docker/entrypoint.sh` environment variables:
   disable only this server.
 - `LLAMA_MCP_WEBUTILS` (default `0`): opt in to registering the bundled
   `webutils-mcp` server with `llama-server` over stdio.
+- `LLAMA_MCP_WEBUTILS_ONLY` (default `0`): force a smaller bundled MCP tool
+  set for llama.cpp by setting `LLAMA_MCP_COREUTILS=0` and
+  `LLAMA_MCP_WEBUTILS=1`. This is useful when a model/runtime rejects the
+  combined tool grammar during sampler initialization (for example,
+  `failed to parse grammar` / `number of rules ... exceeds sane defaults`).
 - `LLAMA_MCP_UI_PROXY` (default `1`, only relevant when
   either `LLAMA_MCP_COREUTILS` or `LLAMA_MCP_WEBUTILS` is enabled): start `llama-server` with
   `--ui-mcp-proxy`, letting the built-in Web UI's browser JavaScript reach
@@ -858,11 +875,17 @@ paired with the wrong chat template. Start with `GET /props`:
   debugging tool invocation itself.
 - For the published Gemma image, the manual end-to-end check is: start
   `ghcr.io/groovy-sky/groovy-agent:gemma-4-e2b-it` with
-  `LLAMA_MCP_WEBUTILS=1`, confirm `GET /tools` advertises
+  `LLAMA_MCP_WEBUTILS_ONLY=1`, confirm `GET /tools` advertises
   `webutils_search_web` and `webutils_browse_url`, then send a direct
   `POST /v1/chat/completions` request instructing the model to call
   `webutils_search_web`. A healthy run should return `finish_reason:
   "tool_calls"` and should not leak literal `<|im_end|>` in assistant text.
+- If startup fails before inference with `parse: error parsing grammar:
+  number of rules that are going to be repeated multiplied by the new
+  repetition exceeds sane defaults`, the combined bundled tool set is too
+  large for that llama.cpp runtime/model pairing; retry with
+  `LLAMA_MCP_WEBUTILS_ONLY=1` so only the two web browsing tools are
+  registered.
 
 ## Quick smoke test
 
