@@ -528,6 +528,72 @@ if grep -qx -- "--ui-mcp-proxy" "$WORK_DIR/output/llama-argv.txt"; then
 fi
 echo "    LLAMA_MCP_COREUTILS=0 starts llama-server without MCP servers or the UI proxy"
 
+# With both bundled MCP servers disabled and no explicit template override, the
+# entrypoint must not force a bundled tool-aware template file.
+EXTRA_RUN_ENV=(-e LLAMA_MCP_COREUTILS=0 -e LLAMA_MCP_WEBUTILS=0)
+run_forwarding_case "no MCP and no explicit template override" --workspace /output "test prompt"
+EXTRA_RUN_ENV=()
+if grep -qx -- "--chat-template-file" "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: no-MCP default path must not force --chat-template-file" >&2
+  exit 1
+fi
+if grep -qx -- "--chat-template" "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: no-MCP default path must not force --chat-template" >&2
+  exit 1
+fi
+echo "    no-MCP default path keeps llama-server's model/default template selection"
+
+# With bundled MCP enabled, keep the bundled default tool-aware template file.
+run_forwarding_case "MCP enabled keeps default bundled template file" --workspace /output "test prompt"
+default_template_file="$(awk 'seen{print; exit} $0=="--chat-template-file"{seen=1}' "$WORK_DIR/output/llama-argv.txt")"
+if [[ "$default_template_file" != "/opt/llama/chat-templates/tool-use-chatml.jinja" ]]; then
+  echo "FAIL: expected default bundled chat template file with MCP enabled, got '${default_template_file:-<missing>}'" >&2
+  exit 1
+fi
+echo "    MCP-enabled default path keeps the bundled tool-aware template file"
+
+# An explicit non-empty template file must be retained even without bundled MCP.
+EXTRA_RUN_ENV=(-e LLAMA_MCP_COREUTILS=0 -e LLAMA_MCP_WEBUTILS=0 -e LLAMA_CHAT_TEMPLATE_FILE=/opt/llama/chat-templates/tool-use-gemma.jinja)
+run_forwarding_case "explicit non-empty chat template file with no MCP" --workspace /output "test prompt"
+EXTRA_RUN_ENV=()
+explicit_template_file="$(awk 'seen{print; exit} $0=="--chat-template-file"{seen=1}' "$WORK_DIR/output/llama-argv.txt")"
+if [[ "$explicit_template_file" != "/opt/llama/chat-templates/tool-use-gemma.jinja" ]]; then
+  echo "FAIL: explicit LLAMA_CHAT_TEMPLATE_FILE must be retained without MCP, got '${explicit_template_file:-<missing>}'" >&2
+  exit 1
+fi
+echo "    explicit non-empty LLAMA_CHAT_TEMPLATE_FILE is retained with no MCP"
+
+# An explicit empty template-file override is intentional and must not be
+# replaced by the bundled default.
+EXTRA_RUN_ENV=(-e LLAMA_MCP_COREUTILS=0 -e LLAMA_MCP_WEBUTILS=0 -e LLAMA_CHAT_TEMPLATE_FILE=)
+run_forwarding_case "explicit empty chat template file with no MCP" --workspace /output "test prompt"
+EXTRA_RUN_ENV=()
+if grep -qx -- "--chat-template-file" "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: explicit empty LLAMA_CHAT_TEMPLATE_FILE must not add --chat-template-file" >&2
+  exit 1
+fi
+if grep -qx -- "--chat-template" "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: explicit empty LLAMA_CHAT_TEMPLATE_FILE must not add --chat-template" >&2
+  exit 1
+fi
+echo "    explicit empty LLAMA_CHAT_TEMPLATE_FILE is preserved with no MCP"
+
+# An explicit LLAMA_CHAT_TEMPLATE must take priority over template-file
+# selection, even when LLAMA_CHAT_TEMPLATE_FILE is also set.
+EXTRA_RUN_ENV=(-e LLAMA_MCP_COREUTILS=0 -e LLAMA_MCP_WEBUTILS=0 -e LLAMA_CHAT_TEMPLATE=chatml -e LLAMA_CHAT_TEMPLATE_FILE=/opt/llama/chat-templates/tool-use-gemma.jinja)
+run_forwarding_case "explicit chat template wins over template file with no MCP" --workspace /output "test prompt"
+EXTRA_RUN_ENV=()
+explicit_template="$(awk 'seen{print; exit} $0=="--chat-template"{seen=1}' "$WORK_DIR/output/llama-argv.txt")"
+if [[ "$explicit_template" != "chatml" ]]; then
+  echo "FAIL: explicit LLAMA_CHAT_TEMPLATE must be retained, got '${explicit_template:-<missing>}'" >&2
+  exit 1
+fi
+if grep -qx -- "--chat-template-file" "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: explicit LLAMA_CHAT_TEMPLATE must win over LLAMA_CHAT_TEMPLATE_FILE" >&2
+  exit 1
+fi
+echo "    explicit LLAMA_CHAT_TEMPLATE is retained and takes priority over template-file selection"
+
 # Without a positional prompt there is nothing for the one-shot agent to do, so
 # the entrypoint must keep llama-server running as an API server instead of
 # invoking groovy-agent and failing with its missing-prompt usage error.

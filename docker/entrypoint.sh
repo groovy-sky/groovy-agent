@@ -178,9 +178,17 @@ EXTERNAL_LLAMA_URL="${EXTERNAL_LLAMA_URL:-}"
 #   an empty string to opt back into llama-server's own template selection
 #   (the model's embedded template, or its plain "chatml" fallback), which
 #   does not support tool calls but may be useful for troubleshooting.
-llama_chat_template_file_was_set="${LLAMA_CHAT_TEMPLATE_FILE:+1}"
-LLAMA_CHAT_TEMPLATE="${LLAMA_CHAT_TEMPLATE:-}"
-LLAMA_CHAT_TEMPLATE_FILE="${LLAMA_CHAT_TEMPLATE_FILE:-/opt/llama/chat-templates/tool-use-chatml.jinja}"
+llama_chat_template_was_set=""
+if [[ ${LLAMA_CHAT_TEMPLATE+x} ]]; then
+  llama_chat_template_was_set="1"
+fi
+llama_chat_template_file_was_set=""
+if [[ ${LLAMA_CHAT_TEMPLATE_FILE+x} ]]; then
+  llama_chat_template_file_was_set="1"
+fi
+LLAMA_BUNDLED_CHAT_TEMPLATE_FILE="${LLAMA_BUNDLED_CHAT_TEMPLATE_FILE:-/opt/llama/chat-templates/tool-use-chatml.jinja}"
+LLAMA_CHAT_TEMPLATE="${LLAMA_CHAT_TEMPLATE-}"
+LLAMA_CHAT_TEMPLATE_FILE="${LLAMA_CHAT_TEMPLATE_FILE-$LLAMA_BUNDLED_CHAT_TEMPLATE_FILE}"
 LLAMA_EXTRA_ARGS="${LLAMA_EXTRA_ARGS:-}"
 
 # Sampling/generation guardrails. These defaults exist to prevent small
@@ -222,6 +230,12 @@ AGENT_MAX_TOOL_CALLS_PER_TURN="${AGENT_MAX_TOOL_CALLS_PER_TURN:-3}"
 use_openai_proxy=0
 if [[ "$LLAMA_MCP_COREUTILS" != "0" || "$LLAMA_MCP_WEBUTILS" != "0" ]]; then
   use_openai_proxy=1
+fi
+
+if [[ "$LLAMA_MCP_COREUTILS" == "0" && "$LLAMA_MCP_WEBUTILS" == "0" \
+  && -z "$llama_chat_template_was_set" \
+  && -z "$llama_chat_template_file_was_set" ]]; then
+  LLAMA_CHAT_TEMPLATE_FILE=""
 fi
 
 # llama-server's built-in Web UI has its own, separate MCP feature: from the
