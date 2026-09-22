@@ -1,0 +1,61 @@
+name: Build and publish webutils CLI image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - cmd/webutils-cli/**
+      - internal/**
+      - webutils/**
+      - docker/webutils-cli.Dockerfile
+      - docker/chromium-wrapper.sh
+      - go.mod
+      - go.sum
+      - .github/workflows/publish-webutils-cli.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/webutils-cli
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags and labels
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: Build and push webutils CLI image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/webutils-cli.Dockerfile
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -183,10 +183,11 @@ go vet ./...
 go test ./...
 ```
 
-This builds three binaries from `cmd/`:
+This builds four binaries from `cmd/`:
 
 - `cmd/agent` → the CLI agent (`groovy-agent`)
 - `cmd/coreutils-mcp` → the standalone coreutils MCP server
+- `cmd/webutils-cli` → the standalone web browsing/search CLI
 - `cmd/webutils-mcp` → the optional Chromium browsing MCP server
 
 The web browsing integration depends on `chromedp`/CDP Go packages; Chromium
@@ -194,10 +195,10 @@ itself is provided by the runtime environment (or bundled Docker image).
 
 ## Local browser prerequisite (Ubuntu/Debian APT, no Snap)
 
-`webutils-mcp` needs a Chrome/Chromium-compatible executable when you run it
-locally outside Docker. On Ubuntu, `chromium-browser` commonly resolves to the
-Snap launcher stub, so it is not the no-Snap installation path for this
-repository.
+`webutils-mcp` and `webutils-cli` need a Chrome/Chromium-compatible executable
+when you run them locally outside Docker. On Ubuntu, `chromium-browser`
+commonly resolves to the Snap launcher stub, so it is not the no-Snap
+installation path for this repository.
 
 For Ubuntu/Debian-style APT environments that must avoid Snap, install Google
 Chrome Stable from Google's signed APT repository with the helper in this repo:
@@ -207,8 +208,8 @@ sudo ./scripts/install-google-chrome-ubuntu.sh
 google-chrome --version
 ```
 
-`webutils-mcp` honors `WEBUTILS_CHROME_EXECUTABLE` when set, so point it at the
-installed binary:
+`webutils-mcp` and `webutils-cli` honor `WEBUTILS_CHROME_EXECUTABLE` when set,
+so point it at the installed binary:
 
 ```sh
 export WEBUTILS_CHROME_EXECUTABLE=/usr/bin/google-chrome
@@ -219,6 +220,53 @@ The bundled container runtime sets `WEBUTILS_CHROME_EXECUTABLE` explicitly to
 payload plus its isolated runtime libraries. Snap-wrapper paths such as
 `chromium-browser` are unsupported for this containerized server because they
 require Snap infrastructure that is not present in the minimal runtime image.
+
+`WEBUTILS_CHROME_ARGS` is also honored by both binaries. The bundled container
+runtime defaults it to:
+
+```sh
+export WEBUTILS_CHROME_ARGS="--no-sandbox --disable-dev-shm-usage"
+```
+
+## Standalone webutils CLI
+
+Build the standalone CLI locally:
+
+```sh
+go build -o bin/webutils-cli ./cmd/webutils-cli
+```
+
+Example `browse` invocation:
+
+```sh
+./bin/webutils-cli browse \
+  -url https://example.com \
+  -screenshot \
+  -action '{"type":"wait_visible","selector":"body"}'
+```
+
+Example `search` invocation:
+
+```sh
+./bin/webutils-cli search -query "golang"
+```
+
+The CLI uses the same Chromium discovery/configuration as `webutils-mcp` and is
+network-enabled, so only run it against trusted or egress-controlled
+destinations.
+
+## Published webutils CLI container
+
+The standalone CLI is also published as a separate GHCR image:
+
+```sh
+docker run --rm ghcr.io/<owner>/webutils-cli:latest browse -url https://example.com
+docker run --rm ghcr.io/<owner>/webutils-cli:latest search -query "golang"
+```
+
+The image sets `WEBUTILS_CHROME_EXECUTABLE=/usr/bin/chromium` and
+`WEBUTILS_CHROME_ARGS="--no-sandbox --disable-dev-shm-usage"` by default, the
+same way the bundled `webutils-mcp` container runtime does.
 
 ## Model download (no GGUF committed to git)
 
