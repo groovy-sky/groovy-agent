@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - cmd/webutils-cli/**
+      - internal/**
       - webutils/**
       - docker/webutils-cli.Dockerfile
       - docker/chromium-wrapper.sh

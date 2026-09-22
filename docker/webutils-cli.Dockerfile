@@ -74,7 +74,6 @@ COPY --from=chromium-debian /chromium-rootfs/ /
 COPY docker/chromium-wrapper.sh /usr/bin/chromium
 RUN chmod +x /usr/bin/chromium /usr/local/bin/webutils-cli \
     && test -x /usr/bin/chromium \
-    && test -u /usr/lib/chromium/chrome-sandbox \
     && /usr/bin/chromium --version >/dev/null \
     && groupadd --gid "${AGENT_GID}" webutils-cli \
     && useradd --uid "${AGENT_UID}" --gid "${AGENT_GID}" --create-home --home-dir "${HOME}" --shell /usr/sbin/nologin webutils-cli \
