@@ -40,7 +40,7 @@ RUN set -eu; \
       apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances chromium chromium-common \
         | sed -n 's/^[| ]*PreDepends: //p; s/^[| ]*Depends: //p' \
         | tr -d '<>' \
-        | awk '$1 != "" && $1 != "chromium" && $1 != "chromium-common" { print $1 }' \
+        | awk '$1 != "" && $1 != "chromium" && $1 != "chromium-common" && $1 != "libc6" { print $1 }' \
         | sort -u \
     )"; \
     for pkg in $payload_packages; do \
