@@ -233,7 +233,7 @@ func writeBrowseResult(stdout io.Writer, result webutils.BrowseResult, screensho
 	}
 	if len(result.ScreenshotPNG) > 0 {
 		if screenshotOut != "" {
-			if err := os.WriteFile(screenshotOut, result.ScreenshotPNG, 0o644); err != nil {
+			if err := os.WriteFile(screenshotOut, result.ScreenshotPNG, 0o600); err != nil {
 				return fmt.Errorf("write screenshot: %w", err)
 			}
 		} else {

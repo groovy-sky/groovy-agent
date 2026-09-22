@@ -12,6 +12,7 @@ on:
       - docker/chromium-wrapper.sh
       - go.mod
       - go.sum
+      - "*.go"
       - .github/workflows/publish-webutils-cli.yml
   workflow_dispatch:
 

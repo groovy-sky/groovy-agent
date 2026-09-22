@@ -317,6 +317,13 @@ func TestRunBrowseWritesScreenshotFile(t *testing.T) {
 	if string(data) != "png-data" {
 		t.Fatalf("unexpected screenshot file contents %q", data)
 	}
+	info, err := os.Stat(screenshotPath)
+	if err != nil {
+		t.Fatalf("stat screenshot file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("expected screenshot file mode 0600, got %o", got)
+	}
 }
 
 func TestRunCommandReportsBrowserErrors(t *testing.T) {
