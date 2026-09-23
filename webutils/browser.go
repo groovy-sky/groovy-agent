@@ -60,6 +60,7 @@ const (
 	browserActionClick       = "click"
 	browserActionSetValue    = "set_value"
 	browserActionType        = "type"
+	browserActionPress       = "press"
 )
 
 const (
@@ -134,6 +135,7 @@ type BrowseRequest struct {
 	MaxTextChars      int
 	CaptureScreenshot bool
 	ScreenshotMode    string
+	WaitText          string
 	Actions           []BrowserAction
 }
 
@@ -333,6 +335,9 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 			return BrowseResult{}, err
 		}
 		actions = append(actions, steps...)
+	}
+	if waitText := strings.TrimSpace(req.WaitText); waitText != "" {
+		actions = append(actions, waitForPageText(waitText))
 	}
 	actions = append(actions,
 		chromedp.Location(&finalURL),
@@ -753,7 +758,7 @@ func validateBrowserActions(actions []BrowserAction, limits Limits) error {
 			if trimmedValue != "" {
 				return fmt.Errorf("browser action %d (%s) does not accept a value", i+1, actionType)
 			}
-		case browserActionSetValue, browserActionType:
+		case browserActionSetValue, browserActionType, browserActionPress:
 			if trimmedValue == "" {
 				return fmt.Errorf("browser action %d (%s) value is required", i+1, actionType)
 			}
@@ -779,6 +784,7 @@ func chromedpActionsForBrowserAction(index int, action BrowserAction, mouse *mou
 		return []chromedp.Action{
 			wrapBrowserAction(index, actionType,
 				chromedp.WaitVisible(selector, chromedp.ByQuery),
+				requireActionable(selector, false),
 				humanHover(selector, index, mouse),
 			),
 		}, nil
@@ -786,6 +792,7 @@ func chromedpActionsForBrowserAction(index int, action BrowserAction, mouse *mou
 		return []chromedp.Action{
 			wrapBrowserAction(index, actionType,
 				chromedp.WaitVisible(selector, chromedp.ByQuery),
+				requireActionable(selector, false),
 				humanHover(selector, index, mouse),
 				humanMouseClick(mouse),
 				waitForStablePage(),
@@ -795,6 +802,7 @@ func chromedpActionsForBrowserAction(index int, action BrowserAction, mouse *mou
 		return []chromedp.Action{
 			wrapBrowserAction(index, actionType,
 				chromedp.WaitVisible(selector, chromedp.ByQuery),
+				requireActionable(selector, true),
 				chromedp.SetValue(selector, action.Value, chromedp.ByQuery),
 			),
 		}, nil
@@ -802,9 +810,20 @@ func chromedpActionsForBrowserAction(index int, action BrowserAction, mouse *mou
 		return []chromedp.Action{
 			wrapBrowserAction(index, actionType,
 				chromedp.WaitVisible(selector, chromedp.ByQuery),
+				requireActionable(selector, true),
 				humanHover(selector, index, mouse),
 				chromedp.Focus(selector, chromedp.ByQuery),
 				humanType(action.Value),
+			),
+		}, nil
+	case browserActionPress:
+		return []chromedp.Action{
+			wrapBrowserAction(index, actionType,
+				chromedp.WaitVisible(selector, chromedp.ByQuery),
+				requireActionable(selector, true),
+				humanHover(selector, index, mouse),
+				chromedp.Focus(selector, chromedp.ByQuery),
+				humanPress(action.Value),
 			),
 		}, nil
 	default:
@@ -881,6 +900,61 @@ func humanType(value string) chromedp.Action {
 			if err := chromedp.Sleep(humanTypeDelay(i)).Do(ctx); err != nil {
 				return err
 			}
+		}
+		return nil
+	})
+}
+
+func humanPress(value string) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		key := strings.TrimSpace(value)
+		if key == "" {
+			return errors.New("press key is required")
+		}
+		down := input.DispatchKeyEvent(input.KeyDown).WithKey(key)
+		up := input.DispatchKeyEvent(input.KeyUp).WithKey(key)
+		switch strings.ToLower(key) {
+		case "enter":
+			down = down.WithCode("Enter").WithWindowsVirtualKeyCode(13).WithNativeVirtualKeyCode(13).WithText("\r").WithUnmodifiedText("\r")
+			up = up.WithCode("Enter").WithWindowsVirtualKeyCode(13).WithNativeVirtualKeyCode(13)
+		case "tab":
+			down = down.WithCode("Tab").WithWindowsVirtualKeyCode(9).WithNativeVirtualKeyCode(9)
+			up = up.WithCode("Tab").WithWindowsVirtualKeyCode(9).WithNativeVirtualKeyCode(9)
+		}
+		if err := down.Do(ctx); err != nil {
+			return err
+		}
+		if err := chromedp.Sleep(30 * time.Millisecond).Do(ctx); err != nil {
+			return err
+		}
+		return up.Do(ctx)
+	})
+}
+
+func requireActionable(selector string, requireEditable bool) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		var reason string
+		script := fmt.Sprintf(`(() => {
+			const el = document.querySelector(%s);
+			if (!el) return "selector not found";
+			const style = window.getComputedStyle(el);
+			if (style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none") {
+				return "selector is not actionable";
+			}
+			if (el.disabled) {
+				return "selector is disabled";
+			}
+			if (%t && (el.readOnly || el.getAttribute("readonly") !== null)) {
+				return "selector is read-only";
+			}
+			return "";
+		})()`, strconv.Quote(selector), requireEditable)
+		if err := chromedp.Evaluate(script, &reason).Do(ctx); err != nil {
+			return err
+		}
+		reason = strings.TrimSpace(reason)
+		if reason != "" {
+			return errors.New(reason)
 		}
 		return nil
 	})
@@ -1017,6 +1091,24 @@ func waitForStablePage() chromedp.Action {
 			}
 			lastURL = currentURL
 			lastReadyState = readyState
+		}
+	})
+}
+
+func waitForPageText(target string) chromedp.Action {
+	target = strings.TrimSpace(target)
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		for {
+			if err := chromedp.Sleep(75 * time.Millisecond).Do(ctx); err != nil {
+				return err
+			}
+			var visibleText string
+			if err := chromedp.Evaluate(`(() => (document.body ? document.body.innerText : ""))()`, &visibleText).Do(ctx); err != nil {
+				return err
+			}
+			if strings.Contains(visibleText, target) {
+				return nil
+			}
 		}
 	})
 }
