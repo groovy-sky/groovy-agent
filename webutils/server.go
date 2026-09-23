@@ -115,6 +115,11 @@ func (s *Server) listTools() mcpproto.ListToolsResult {
 
 func inputSchema(limits Limits) map[string]any {
 	limits = normalizeLimits(limits)
+	// llama.cpp currently compiles schema string maxLength constraints into GBNF
+	// repetition ranges. Keep advertised limits away from known parser boundary
+	// values (notably exactly 2000 for the pinned runtime), and re-check other
+	// large maxLength fields here such as url and wait_text if these limits ever
+	// change. See https://github.com/ggml-org/llama.cpp/issues/27087.
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{

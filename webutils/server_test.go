@@ -69,6 +69,20 @@ func TestToolSchemaAndListWiring(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected action properties schema, got %+v", items["properties"])
 	}
+	valueSchema, ok := actionProps["value"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected action value schema, got %+v", actionProps["value"])
+	}
+	maxLength, ok := valueSchema["maxLength"].(float64)
+	if !ok {
+		t.Fatalf("expected action value maxLength number, got %+v", valueSchema["maxLength"])
+	}
+	if int(maxLength) != DefaultLimits().MaxActionValueChars {
+		t.Fatalf("expected action value maxLength %d, got %v", DefaultLimits().MaxActionValueChars, maxLength)
+	}
+	if int(maxLength) == 2000 {
+		t.Fatal("actions.value maxLength must avoid llama.cpp's exact 2000 grammar boundary")
+	}
 	actionType, ok := actionProps["type"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected action type schema, got %+v", actionProps["type"])
@@ -108,6 +122,16 @@ func TestToolSchemaAndListWiring(t *testing.T) {
 	}
 	if _, ok := searchProps["max_results"]; !ok {
 		t.Fatalf("expected max_results property, got %+v", searchProps)
+	}
+}
+
+func TestDefaultLimitsAvoidLlamaGrammarBoundary(t *testing.T) {
+	defaults := DefaultLimits()
+	if defaults.MaxActionValueChars != 1999 {
+		t.Fatalf("expected default MaxActionValueChars 1999, got %d", defaults.MaxActionValueChars)
+	}
+	if defaults.MaxActionValueChars == 2000 {
+		t.Fatal("default MaxActionValueChars must avoid llama.cpp's exact 2000 maxLength boundary")
 	}
 }
 
