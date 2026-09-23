@@ -628,6 +628,23 @@ func TestChromiumBrowserBrowseTypeAppendsText(t *testing.T) {
 	}
 }
 
+func TestChromiumBrowserBrowsePressDispatchesKeyAction(t *testing.T) {
+	browser, server := newFixtureBrowser(t, DefaultLimits(), false, "allowed.example")
+
+	result, err := browser.Browse(context.Background(), BrowseRequest{
+		URL: fixtureURL(t, server, "allowed.example", "/actions/form"),
+		Actions: []BrowserAction{
+			{Type: browserActionPress, Selector: "#target-input", Value: "Enter"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Browse returned error: %v", err)
+	}
+	if !strings.Contains(result.VisibleText, "enter pressed") {
+		t.Fatalf("expected visible text to contain enter key state, got %q", result.VisibleText)
+	}
+}
+
 func TestChromiumBrowserBrowseClickUpdatesRenderedDOM(t *testing.T) {
 	browser, server := newFixtureBrowser(t, DefaultLimits(), false, "allowed.example")
 
@@ -695,6 +712,21 @@ func TestChromiumBrowserBrowseWaitVisibleWaitsForAsyncElement(t *testing.T) {
 	}
 	if !strings.Contains(result.VisibleText, "late element ready") {
 		t.Fatalf("expected visible text to contain late element text, got %q", result.VisibleText)
+	}
+}
+
+func TestChromiumBrowserBrowseWaitTextWaitsForAsyncContent(t *testing.T) {
+	browser, server := newFixtureBrowser(t, DefaultLimits(), false, "allowed.example")
+
+	result, err := browser.Browse(context.Background(), BrowseRequest{
+		URL:      fixtureURL(t, server, "allowed.example", "/actions/wait"),
+		WaitText: "late element ready",
+	})
+	if err != nil {
+		t.Fatalf("Browse returned error: %v", err)
+	}
+	if !strings.Contains(result.VisibleText, "late element ready") {
+		t.Fatalf("expected visible text to contain wait_text target, got %q", result.VisibleText)
 	}
 }
 
@@ -772,6 +804,11 @@ func TestChromiumBrowserBrowseRejectsInvalidActions(t *testing.T) {
 			wantMessage: "browser action 1 (click) does not accept a value",
 			notContains: []string{"super-secret-password"},
 		},
+		{
+			name:        "press requires value",
+			actions:     []BrowserAction{{Type: browserActionPress, Selector: "#ok", Value: " \t "}},
+			wantMessage: "browser action 1 (press) value is required",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -795,6 +832,23 @@ func TestChromiumBrowserBrowseRejectsInvalidActions(t *testing.T) {
 	}
 }
 
+func TestChromiumBrowserBrowseRejectsDisabledClickTarget(t *testing.T) {
+	browser, server := newFixtureBrowser(t, DefaultLimits(), false, "allowed.example")
+
+	_, err := browser.Browse(context.Background(), BrowseRequest{
+		URL: fixtureURL(t, server, "allowed.example", "/actions/form"),
+		Actions: []BrowserAction{
+			{Type: browserActionClick, Selector: "#disabled-target"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected disabled click target to fail")
+	}
+	if !strings.Contains(err.Error(), "selector is disabled") {
+		t.Fatalf("expected disabled selector error, got %v", err)
+	}
+}
+
 func TestChromiumBrowserBrowseMissingSelectorTimesOut(t *testing.T) {
 	limits := DefaultLimits()
 	limits.Timeout = 2 * time.Second
@@ -808,6 +862,20 @@ func TestChromiumBrowserBrowseMissingSelectorTimesOut(t *testing.T) {
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected deadline exceeded for missing selector, got %v", err)
+	}
+}
+
+func TestChromiumBrowserBrowseWaitTextTimesOutWhenNotFound(t *testing.T) {
+	limits := DefaultLimits()
+	limits.Timeout = 2 * time.Second
+	browser, server := newFixtureBrowser(t, limits, false, "allowed.example")
+
+	_, err := browser.Browse(context.Background(), BrowseRequest{
+		URL:      fixtureURL(t, server, "allowed.example", "/actions/wait"),
+		WaitText: "never arrives",
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded for missing wait_text, got %v", err)
 	}
 }
 
@@ -943,7 +1011,7 @@ func newBrowserFixtureServer(t *testing.T, includeBlockedScript bool) (*httptest
 			_, _ = w.Write([]byte(`<!doctype html><html><head><title>Fixture Next</title></head><body>next page</body></html>`))
 		case "/actions/form":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(`<!doctype html><html><head><title>Action Form</title></head><body><label for="target-input">Input</label><input id="target-input" value="seed value" onfocus="this.setSelectionRange(this.value.length, this.value.length)"><button id="show-value" type="button" onclick="document.getElementById('value-output').textContent = document.getElementById('target-input').value">Show value</button><button id="show-dom" type="button" onclick="document.getElementById('dom-output').textContent = 'clicked state'">Change DOM</button><button id="event-target" type="button" onmouseenter="document.getElementById('pointer-output').textContent = 'hovered'" onmousemove="document.getElementById('pointer-output').textContent = 'hovered moving'" onmousedown="window.recordEvent('mousedown')" onmouseup="window.recordEvent('mouseup')" onclick="window.recordEvent('click')">Event target</button><a id="go-next" href="/next-action">Go next</a><div id="value-output">pending value</div><div id="dom-output">before click</div><div id="pointer-output">not hovered</div><div id="event-output">pending events</div><script>window.recordEvent = function (name) { var output = document.getElementById('event-output'); output.textContent = output.textContent === 'pending events' ? name : output.textContent + ' ' + name; };</script></body></html>`))
+			_, _ = w.Write([]byte(`<!doctype html><html><head><title>Action Form</title></head><body><label for="target-input">Input</label><input id="target-input" value="seed value" onfocus="this.setSelectionRange(this.value.length, this.value.length)" onkeydown="if (event.key === 'Enter') { document.getElementById('key-output').textContent = 'enter pressed'; }"><button id="show-value" type="button" onclick="document.getElementById('value-output').textContent = document.getElementById('target-input').value">Show value</button><button id="show-dom" type="button" onclick="document.getElementById('dom-output').textContent = 'clicked state'">Change DOM</button><button id="event-target" type="button" onmouseenter="document.getElementById('pointer-output').textContent = 'hovered'" onmousemove="document.getElementById('pointer-output').textContent = 'hovered moving'" onmousedown="window.recordEvent('mousedown')" onmouseup="window.recordEvent('mouseup')" onclick="window.recordEvent('click')">Event target</button><button id="disabled-target" type="button" disabled>Disabled action</button><a id="go-next" href="/next-action">Go next</a><div id="value-output">pending value</div><div id="dom-output">before click</div><div id="pointer-output">not hovered</div><div id="event-output">pending events</div><div id="key-output">pending key</div><script>window.recordEvent = function (name) { var output = document.getElementById('event-output'); output.textContent = output.textContent === 'pending events' ? name : output.textContent + ' ' + name; };</script></body></html>`))
 		case "/actions/wait":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			_, _ = w.Write([]byte(`<!doctype html><html><head><title>Wait Fixture</title></head><body><div>waiting for async content</div><script>window.setTimeout(function () { var element = document.createElement('div'); element.id = 'late-element'; element.textContent = 'late element ready'; document.body.appendChild(element); }, 150);</script></body></html>`))

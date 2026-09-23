@@ -51,12 +51,41 @@ func TestToolSchemaAndListWiring(t *testing.T) {
 	if _, ok := properties["capture_screenshot"]; !ok {
 		t.Fatalf("expected capture_screenshot property, got %+v", properties)
 	}
+	if _, ok := properties["wait_text"]; !ok {
+		t.Fatalf("expected wait_text property, got %+v", properties)
+	}
 	actions, ok := properties["actions"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected actions property, got %+v", properties["actions"])
 	}
 	if actions["maxItems"] == nil {
 		t.Fatalf("expected actions maxItems bound, got %+v", actions)
+	}
+	items, ok := actions["items"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected actions items schema, got %+v", actions["items"])
+	}
+	actionProps, ok := items["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected action properties schema, got %+v", items["properties"])
+	}
+	actionType, ok := actionProps["type"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected action type schema, got %+v", actionProps["type"])
+	}
+	enum, ok := actionType["enum"].([]any)
+	if !ok {
+		t.Fatalf("expected action type enum, got %+v", actionType["enum"])
+	}
+	foundPress := false
+	for _, entry := range enum {
+		if entry == browserActionPress {
+			foundPress = true
+			break
+		}
+	}
+	if !foundPress {
+		t.Fatalf("expected press action in schema enum, got %+v", enum)
 	}
 	mode, ok := properties["screenshot_mode"].(map[string]any)
 	if !ok {
@@ -95,7 +124,7 @@ func TestCallToolSuccess(t *testing.T) {
 		ScreenshotPNG:    []byte("png-bytes"),
 	}}
 	server := NewServer(DefaultLimits(), browser, log.New(io.Discard, "", 0))
-	raw := json.RawMessage(`{"name":"browse_url","arguments":{"url":"https://example.com","max_text_chars":123,"capture_screenshot":true,"screenshot_mode":"full_page","actions":[{"type":"hover","selector":"#cta"},{"type":"click","selector":"#cta"}]}}`)
+	raw := json.RawMessage(`{"name":"browse_url","arguments":{"url":"https://example.com","max_text_chars":123,"capture_screenshot":true,"screenshot_mode":"full_page","wait_text":"Done loading","actions":[{"type":"hover","selector":"#cta"},{"type":"press","selector":"#cta","value":"Enter"}]}}`)
 	result := server.callTool(context.Background(), raw)
 	if result.IsError {
 		t.Fatalf("callTool returned error result: %+v", result)
@@ -125,7 +154,10 @@ func TestCallToolSuccess(t *testing.T) {
 	if browser.last.ScreenshotMode != screenshotModeFullPage {
 		t.Fatalf("expected screenshot_mode to be forwarded, got %q", browser.last.ScreenshotMode)
 	}
-	if len(browser.last.Actions) != 2 || browser.last.Actions[0].Type != browserActionHover || browser.last.Actions[1].Selector != "#cta" {
+	if browser.last.WaitText != "Done loading" {
+		t.Fatalf("expected wait_text to be forwarded, got %q", browser.last.WaitText)
+	}
+	if len(browser.last.Actions) != 2 || browser.last.Actions[0].Type != browserActionHover || browser.last.Actions[1].Type != browserActionPress || browser.last.Actions[1].Value != "Enter" {
 		t.Fatalf("expected actions to be forwarded, got %+v", browser.last.Actions)
 	}
 }

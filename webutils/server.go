@@ -139,6 +139,11 @@ func inputSchema(limits Limits) map[string]any {
 				"description": "Screenshot capture mode when capture_screenshot is true.",
 				"enum":        []any{screenshotModeViewport, screenshotModeFullPage},
 			},
+			"wait_text": map[string]any{
+				"type":        "string",
+				"description": "Optional text to wait for after actions complete and before extraction.",
+				"maxLength":   limits.MaxAllowedTextChars,
+			},
 			"actions": map[string]any{
 				"type":        "array",
 				"description": "Optional sequential CSS-selector actions to execute after navigation.",
@@ -149,7 +154,7 @@ func inputSchema(limits Limits) map[string]any {
 						"type": map[string]any{
 							"type":        "string",
 							"description": "Action type.",
-							"enum":        []any{browserActionWaitVisible, browserActionHover, browserActionClick, browserActionSetValue, browserActionType},
+							"enum":        []any{browserActionWaitVisible, browserActionHover, browserActionClick, browserActionSetValue, browserActionType, browserActionPress},
 							"maxLength":   limits.MaxActionTypeChars,
 						},
 						"selector": map[string]any{
@@ -159,7 +164,7 @@ func inputSchema(limits Limits) map[string]any {
 						},
 						"value": map[string]any{
 							"type":        "string",
-							"description": "Value used by set_value and type actions.",
+							"description": "Value used by set_value, type, and press actions.",
 							"maxLength":   limits.MaxActionValueChars,
 						},
 					},
@@ -224,6 +229,7 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) mcpproto.Cal
 			MaxTextChars:      optionalInt(arguments, "max_text_chars"),
 			CaptureScreenshot: optionalBool(arguments, "capture_screenshot"),
 			ScreenshotMode:    optionalString(arguments, "screenshot_mode"),
+			WaitText:          optionalString(arguments, "wait_text"),
 			Actions:           optionalActions(arguments, "actions"),
 		}
 		result, err := s.browser.Browse(ctx, request)
