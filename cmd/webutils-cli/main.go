@@ -340,20 +340,20 @@ func parseBrowserAction(value string) (webutils.BrowserAction, error) {
 
 	action.Type = strings.TrimSpace(action.Type)
 	action.Selector = strings.TrimSpace(action.Selector)
-	action.Value = strings.TrimSpace(action.Value)
+	trimmedValue := strings.TrimSpace(action.Value)
 	switch action.Type {
 	case "wait_visible", "hover", "click":
 		if action.Selector == "" {
 			return webutils.BrowserAction{}, errors.New(`invalid -action JSON: "selector" is required`)
 		}
-		if action.Value != "" {
+		if trimmedValue != "" {
 			return webutils.BrowserAction{}, fmt.Errorf("invalid -action JSON: action type %q does not accept a value", action.Type)
 		}
 	case "set_value", "type":
 		if action.Selector == "" {
 			return webutils.BrowserAction{}, errors.New(`invalid -action JSON: "selector" is required`)
 		}
-		if action.Value == "" {
+		if trimmedValue == "" {
 			return webutils.BrowserAction{}, fmt.Errorf("invalid -action JSON: action type %q requires a value", action.Type)
 		}
 	default:

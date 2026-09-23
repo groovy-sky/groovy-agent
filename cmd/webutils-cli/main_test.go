@@ -45,6 +45,18 @@ func TestParseBrowserActionValid(t *testing.T) {
 	}
 }
 
+func TestParseBrowserActionPreservesValueWhitespace(t *testing.T) {
+	t.Parallel()
+
+	action, err := parseBrowserAction(`{"type":"type","selector":"#target-input","value":" plus more "}`)
+	if err != nil {
+		t.Fatalf("parseBrowserAction returned error: %v", err)
+	}
+	if action.Value != " plus more " {
+		t.Fatalf("expected value whitespace to be preserved, got %q", action.Value)
+	}
+}
+
 func TestParseBrowserActionInvalid(t *testing.T) {
 	t.Parallel()
 
