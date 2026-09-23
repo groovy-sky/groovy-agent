@@ -40,7 +40,10 @@ const (
 	defaultMaxActions       = 8
 	defaultMaxActionType    = 32
 	defaultMaxSelectorChars = 512
-	defaultMaxActionValue   = 2000
+	// Keep this off llama.cpp's exact MAX_REPETITION_THRESHOLD boundary: the
+	// pinned grammar compiler rejects a schema maxLength of exactly 2000 (see
+	// https://github.com/ggml-org/llama.cpp/issues/27087).
+	defaultMaxActionValue   = 1999
 	chromeExecutableEnvVar  = "WEBUTILS_CHROME_EXECUTABLE"
 	chromeArgsEnvVar        = "WEBUTILS_CHROME_ARGS"
 	defaultChromeExecutable = "/usr/bin/chromium"
