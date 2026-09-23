@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	maxURLLength      = 2048
-	maxHostnameLength = 253
+	maxURLLength      = 4096
+	maxHostnameLength = 512
 )
 
 var (
