@@ -15,7 +15,11 @@ import (
 func main() {
 	flag.Parse()
 	logger := log.New(os.Stderr, "webutils-mcp: ", 0)
-	server := webutils.NewServer(webutils.DefaultLimits(), nil, logger)
+	server, err := webutils.NewServerFromEnv(webutils.DefaultLimits(), nil, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "webutils-mcp: %s\n", err)
+		os.Exit(1)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

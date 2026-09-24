@@ -17,31 +17,61 @@ import (
 )
 
 const (
-	toolNameBrowseURL = "browse_url"
-	toolNameSearchWeb = "search_web"
+	toolNameBrowseURL              = "browse_url"
+	toolNameSearchWeb              = "search_web"
+	toolNameBrowserSessionCreate   = "browser_session_create"
+	toolNameBrowserSessionStatus   = "browser_session_status"
+	toolNameBrowserSessionContinue = "browser_session_continue"
+	toolNameBrowserSessionCancel   = "browser_session_cancel"
 )
 
 type Server struct {
-	logger  *log.Logger
-	limits  Limits
-	browser Browser
+	logger        *log.Logger
+	limits        Limits
+	browser       Browser
+	chromeControl *chromeControlClient
 
-	writeMutex sync.Mutex
+	writeMutex    sync.Mutex
+	sessionMutex  sync.Mutex
+	sessionTokens map[string]struct{}
 }
 
 func NewServer(limits Limits, browser Browser, logger *log.Logger) *Server {
+	return newServer(limits, browser, nil, logger)
+}
+
+func NewServerFromEnv(limits Limits, browser Browser, logger *log.Logger) (*Server, error) {
+	client, err := newChromeControlClientFromEnv(defaultResolver())
+	if err != nil {
+		return nil, err
+	}
+	return newServer(limits, browser, client, logger), nil
+}
+
+func newServer(limits Limits, browser Browser, chromeControl *chromeControlClient, logger *log.Logger) *Server {
 	if browser == nil {
 		browser = NewChromiumBrowser(limits)
 	}
 	return &Server{
-		logger:  logger,
-		limits:  limits,
-		browser: browser,
+		logger:        logger,
+		limits:        limits,
+		browser:       browser,
+		chromeControl: chromeControl,
+		sessionTokens: map[string]struct{}{},
 	}
 }
 
 func (s *Server) ToolNames() []string {
-	return []string{toolNameBrowseURL, toolNameSearchWeb}
+	names := []string{toolNameBrowseURL, toolNameSearchWeb}
+	if s.chromeControl != nil {
+		names = append(names,
+			toolNameBrowserSessionCreate,
+			toolNameBrowserSessionStatus,
+			toolNameBrowserSessionContinue,
+			toolNameBrowserSessionCancel,
+		)
+	}
+	return names
 }
 
 func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) error {
@@ -97,20 +127,43 @@ func (s *Server) dispatch(ctx context.Context, output io.Writer, request mcpprot
 }
 
 func (s *Server) listTools() mcpproto.ListToolsResult {
-	return mcpproto.ListToolsResult{
-		Tools: []mcpproto.Tool{
-			{
-				Name:        toolNameBrowseURL,
-				Description: "Browse one public HTTPS page with a fresh headless Chromium instance, optionally execute sequential CSS-selector actions after navigation, and return bounded extracted content, visible text, links, and optional screenshot.",
-				InputSchema: mustJSON(inputSchema(s.limits)),
-			},
-			{
-				Name:        toolNameSearchWeb,
-				Description: "Search the public web with DuckDuckGo and return bounded, policy-validated result links with snippets for follow-up browsing.",
-				InputSchema: mustJSON(inputSchemaSearch()),
-			},
+	tools := []mcpproto.Tool{
+		{
+			Name:        toolNameBrowseURL,
+			Description: "Browse one public HTTPS page with a fresh headless Chromium instance, optionally execute sequential CSS-selector actions after navigation, and return bounded extracted content, visible text, links, and optional screenshot.",
+			InputSchema: mustJSON(inputSchema(s.limits)),
+		},
+		{
+			Name:        toolNameSearchWeb,
+			Description: "Search the public web with DuckDuckGo and return bounded, policy-validated result links with snippets for follow-up browsing.",
+			InputSchema: mustJSON(inputSchemaSearch()),
 		},
 	}
+	if s.chromeControl != nil {
+		tools = append(tools,
+			mcpproto.Tool{
+				Name:        toolNameBrowserSessionCreate,
+				Description: "Create a remote interactive Chromium session for a human operator to drive via noVNC, then continue extraction after manual interaction.",
+				InputSchema: mustJSON(inputSchemaBrowserSessionCreate()),
+			},
+			mcpproto.Tool{
+				Name:        toolNameBrowserSessionStatus,
+				Description: "Get the current status or final extracted result of a remote interactive browser session token.",
+				InputSchema: mustJSON(inputSchemaBrowserSessionTokenOnly()),
+			},
+			mcpproto.Tool{
+				Name:        toolNameBrowserSessionContinue,
+				Description: "Signal that manual browser interaction is complete, then optionally poll for the extracted result.",
+				InputSchema: mustJSON(inputSchemaBrowserSessionContinue()),
+			},
+			mcpproto.Tool{
+				Name:        toolNameBrowserSessionCancel,
+				Description: "Cancel a remote interactive browser session token.",
+				InputSchema: mustJSON(inputSchemaBrowserSessionTokenOnly()),
+			},
+		)
+	}
+	return mcpproto.ListToolsResult{Tools: tools}
 }
 
 func inputSchema(limits Limits) map[string]any {
@@ -289,6 +342,11 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) mcpproto.Cal
 		return mcpproto.CallToolResult{
 			Content: []mcpproto.Content{{Type: "text", Text: encode(body)}},
 		}
+	case toolNameBrowserSessionCreate, toolNameBrowserSessionStatus, toolNameBrowserSessionContinue, toolNameBrowserSessionCancel:
+		if s.chromeControl == nil {
+			return errorResult(mcpproto.ErrorUnknownTool, "tool is not available")
+		}
+		return s.callBrowserSessionTool(ctx, params.Name, params.Arguments)
 	default:
 		return errorResult(mcpproto.ErrorUnknownTool, "tool is not available")
 	}

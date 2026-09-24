@@ -786,6 +786,29 @@ Agent CLI flags (`cmd/agent`):
     `truncated`) as an MCP text content block
   - optional PNG screenshot as a separate MCP image content block when
     `capture_screenshot` is true
+- optional interactive-session tools (only when
+  `WEBUTILS_CHROME_CONTROL_URL` is set):
+  - `browser_session_create` arguments:
+    - `url` (optional, HTTPS/public destination policy is enforced by
+      `chrome-control`)
+    - `capture_screenshot` (optional)
+    - `max_text_chars` (optional, bounded)
+  - `browser_session_create` returns:
+    - opaque session `token`
+    - `status`
+    - optional `novnc_url` for a human operator
+  - `browser_session_status` arguments:
+    - `token` (required, bounded opaque token)
+  - `browser_session_continue` arguments:
+    - `token` (required, bounded opaque token)
+    - `wait_for_completion` (optional, default `false`)
+    - `max_wait_seconds` (optional, bounded)
+  - `browser_session_cancel` arguments:
+    - `token` (required, bounded opaque token)
+  - intended flow: create session → human opens noVNC and interacts manually
+    (for example Cloudflare/CAPTCHA completion) → continue/status → model reads
+    extracted page content/links/metadata. The model does **not** solve
+    challenges automatically.
 - actions stay closed-schema and selector-based; `webutils-mcp` does not expose
   arbitrary JavaScript, unrestricted coordinates, or raw CDP access.
 - hover/click/type are executed server-side with bounded Chromium input events,
@@ -807,6 +830,60 @@ Agent CLI flags (`cmd/agent`):
   so `--no-sandbox` remains the compatibility default. If your runtime permits a
   usable Chromium sandbox, you can override this variable to drop
   `--no-sandbox`.
+- `WEBUTILS_CHROME_CONTROL_URL` (default unset/disabled): optional base URL for
+  a remote `chrome-control` service. When set, `webutils-mcp` advertises the
+  interactive session tools above in addition to `browse_url` / `search_web`.
+  When unset, behavior and tool list remain unchanged.
+- `WEBUTILS_CHROME_CONTROL_NOVNC_URL` (default unset): optional operator-facing
+  base URL used in `browser_session_create` responses to construct a human noVNC
+  link (typically `http://127.0.0.1:6080/vnc.html`).
+
+### Optional remote interactive backend (`chrome-control`)
+
+You can run `groovy-agent` with `chrome-control` as a sidecar backend for
+human-in-the-loop browser sessions. Keep noVNC private (localhost, SSH tunnel,
+VPN, or authenticated reverse proxy); do not expose unauthenticated noVNC on
+the public internet.
+
+Example Compose (also committed as
+`docker/docker-compose.chrome-control.yml`):
+
+```yaml
+services:
+  groovy-agent:
+    image: ghcr.io/groovy-sky/groovy-agent:latest
+    environment:
+      LLAMA_MCP_WEBUTILS: "1"
+      WEBUTILS_CHROME_CONTROL_URL: "http://chrome-control:8080"
+      WEBUTILS_CHROME_CONTROL_NOVNC_URL: "http://127.0.0.1:6080"
+      LLAMA_MODEL_PATH: "/models/<your-model>.gguf"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./models:/models:ro
+    depends_on:
+      - chrome-control
+    networks: [private]
+
+  chrome-control:
+    image: ghcr.io/groovy-sky/chrome-control:main-novnc
+    environment:
+      WORKER_LISTEN_ADDR: "0.0.0.0:8080"
+    ports:
+      - "127.0.0.1:6080:6080"
+    networks: [private]
+
+networks:
+  private:
+    internal: true
+```
+
+If an operator needs remote access to noVNC, tunnel it instead of publishing it
+publicly:
+
+```bash
+ssh -L 6080:127.0.0.1:6080 <host-running-compose>
+```
 
 Container/`docker/entrypoint.sh` environment variables:
 

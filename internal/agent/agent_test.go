@@ -139,6 +139,10 @@ func TestFilterDiscoveredAllowsWebToolOnlyInWebAllowlist(t *testing.T) {
 	tools := []mcpproto.Tool{
 		{Name: "browse_url", InputSchema: schema},
 		{Name: "search_web", InputSchema: schema},
+		{Name: "browser_session_create", InputSchema: schema},
+		{Name: "browser_session_status", InputSchema: schema},
+		{Name: "browser_session_continue", InputSchema: schema},
+		{Name: "browser_session_cancel", InputSchema: schema},
 	}
 	kept := FilterDiscovered(tools, AllowedWebTools, nil)
 	if _, ok := kept["browse_url"]; !ok {
@@ -146,6 +150,18 @@ func TestFilterDiscoveredAllowsWebToolOnlyInWebAllowlist(t *testing.T) {
 	}
 	if _, ok := kept["search_web"]; !ok {
 		t.Fatal("search_web must be allowed in the explicit web allowlist")
+	}
+	if _, ok := kept["browser_session_create"]; !ok {
+		t.Fatal("browser_session_create must be allowed in the explicit web allowlist")
+	}
+	if _, ok := kept["browser_session_status"]; !ok {
+		t.Fatal("browser_session_status must be allowed in the explicit web allowlist")
+	}
+	if _, ok := kept["browser_session_continue"]; !ok {
+		t.Fatal("browser_session_continue must be allowed in the explicit web allowlist")
+	}
+	if _, ok := kept["browser_session_cancel"]; !ok {
+		t.Fatal("browser_session_cancel must be allowed in the explicit web allowlist")
 	}
 }
 
