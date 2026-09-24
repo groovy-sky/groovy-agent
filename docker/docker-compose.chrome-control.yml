@@ -1,0 +1,29 @@
+services:
+  groovy-agent:
+    image: ghcr.io/groovy-sky/groovy-agent:latest
+    environment:
+      LLAMA_MCP_WEBUTILS: "1"
+      WEBUTILS_CHROME_CONTROL_URL: "http://chrome-control:8080"
+      WEBUTILS_CHROME_CONTROL_NOVNC_URL: "http://127.0.0.1:6080"
+      LLAMA_MODEL_PATH: "/models/<your-model>.gguf"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./models:/models:ro
+    depends_on:
+      - chrome-control
+    networks:
+      - private
+
+  chrome-control:
+    image: ghcr.io/groovy-sky/chrome-control:main-novnc
+    environment:
+      WORKER_LISTEN_ADDR: "0.0.0.0:8080"
+    ports:
+      - "127.0.0.1:6080:6080"
+    networks:
+      - private
+
+networks:
+  private:
+    internal: true

@@ -23,8 +23,15 @@ var profiles = []struct {
 	keywords []string
 }{
 	{
-		profile:  Profile{Name: "web_browse", Tools: []string{"search_web", "browse_url"}},
-		keywords: []string{"browse", "web", "website", "url", "https://", "http://", "page", "search web", "search online", "current information", "latest"},
+		profile: Profile{Name: "web_browse", Tools: []string{
+			"search_web",
+			"browse_url",
+			"browser_session_create",
+			"browser_session_status",
+			"browser_session_continue",
+			"browser_session_cancel",
+		}},
+		keywords: []string{"browse", "web", "website", "url", "https://", "http://", "page", "search web", "search online", "current information", "latest", "cloudflare", "captcha", "interactive session", "novnc"},
 	},
 	{
 		profile:  Profile{Name: "date", Tools: []string{"coreutils_run"}},

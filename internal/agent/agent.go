@@ -58,7 +58,14 @@ var AllowedCoreTools = []string{
 }
 
 // AllowedWebTools are only considered when an explicit web MCP command is set.
-var AllowedWebTools = []string{"browse_url", "search_web"}
+var AllowedWebTools = []string{
+	"browse_url",
+	"search_web",
+	"browser_session_create",
+	"browser_session_status",
+	"browser_session_continue",
+	"browser_session_cancel",
+}
 
 // Config holds the validated CLI configuration.
 type Config struct {
