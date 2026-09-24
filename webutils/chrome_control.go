@@ -247,6 +247,13 @@ func (s *Server) callBrowserSessionTool(ctx context.Context, toolName string, ra
 		if err := s.chromeControl.continueSession(ctx, token); err != nil {
 			return mapBrowserSessionError(err)
 		}
+		if !waitForCompletion {
+			return mcpproto.CallToolResult{Content: []mcpproto.Content{{Type: "text", Text: encode(map[string]any{
+				"success": true,
+				"token":   token,
+				"session": map[string]any{"status": "waiting"},
+			})}}}
+		}
 		status, err := s.chromeControl.sessionStatus(ctx, token)
 		if err != nil {
 			return mapBrowserSessionError(err)

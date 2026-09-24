@@ -186,3 +186,35 @@ func TestBrowserSessionErrorTranslation(t *testing.T) {
 		t.Fatalf("expected permission_denied, got %+v", body)
 	}
 }
+
+func TestBrowserSessionContinueWithoutWaitSkipsStatusPoll(t *testing.T) {
+	var getCalls int
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sessions/tok_abc12345/continue":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions/tok_abc12345":
+			getCalls++
+			_, _ = w.Write([]byte(`{"status":"waiting"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer backend.Close()
+
+	baseURL, _ := url.Parse(backend.URL)
+	server := newServer(DefaultLimits(), &fakeBrowser{}, &chromeControlClient{
+		baseURL:  baseURL,
+		client:   backend.Client(),
+		resolver: defaultResolver(),
+	}, log.New(io.Discard, "", 0))
+
+	result := server.callTool(context.Background(), json.RawMessage(`{"name":"browser_session_continue","arguments":{"token":"tok_abc12345","wait_for_completion":false}}`))
+	if result.IsError {
+		t.Fatalf("continue failed: %+v", result)
+	}
+	if getCalls != 0 {
+		t.Fatalf("expected no status poll when wait_for_completion=false, got %d GET calls", getCalls)
+	}
+}

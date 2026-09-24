@@ -801,7 +801,7 @@ Agent CLI flags (`cmd/agent`):
     - `token` (required, bounded opaque token)
   - `browser_session_continue` arguments:
     - `token` (required, bounded opaque token)
-    - `wait_for_completion` (optional, default `false`)
+    - `wait_for_completion` (optional, default `true`)
     - `max_wait_seconds` (optional, bounded)
   - `browser_session_cancel` arguments:
     - `token` (required, bounded opaque token)
